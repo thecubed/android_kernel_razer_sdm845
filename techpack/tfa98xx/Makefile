@@ -11,7 +11,10 @@
 # In case of out of tree build, build as a module
 # (when build inside kernel we will not enter this directory and this will have no effect)
 ifeq ($(CONFIG_SND_SOC_TFA98XX),)
-CONFIG_SND_SOC_TFA98XX := m
+# CONFIG_SND_SOC_TFA98XX := m
+
+# Bad hack, I know. I'll fix it later. It's 3AM right now and I'm tired.
+CONFIG_SND_SOC_TFA98XX := y
 endif
 
 ifneq ($(KERNELRELEASE),)
