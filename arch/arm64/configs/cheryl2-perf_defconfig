@@ -1,8 +1,6 @@
 CONFIG_LOCALVERSION="-perf"
 # need this to build DT! (idk why)
 CONFIG_BUILD_ARM64_DT_OVERLAY=y
-# need this to build techpack/tfa98xx from oss source
-CONFIG_SND_SOC_TFA98XX=y
 # CONFIG_LOCALVERSION_AUTO is not set
 # CONFIG_FHANDLE is not set
 CONFIG_AUDIT=y
