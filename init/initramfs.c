@@ -616,7 +616,8 @@ static int __init skip_initramfs_param(char *str)
 	do_skip_initramfs = 1;
 	return 1;
 }
-__setup("skip_initramfs", skip_initramfs_param);
+// To break magisk patching, we want to make it so the binary patcher doesn't find the string skip_initramfs
+__setup("skip__initramfs", skip_initramfs_param);
 
 static int __init populate_rootfs(void)
 {
