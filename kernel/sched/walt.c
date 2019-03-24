@@ -47,7 +47,8 @@ static bool sched_ktime_suspended;
 static struct cpu_cycle_counter_cb cpu_cycle_counter_cb;
 static bool use_cycle_counter;
 DEFINE_MUTEX(cluster_lock);
-atomic64_t walt_irq_work_lastq_ws;
+static atomic64_t walt_irq_work_lastq_ws;
+u64 walt_load_reported_window;
 
 static struct irq_work walt_cpufreq_irq_work;
 static struct irq_work walt_migration_irq_work;
@@ -86,11 +87,16 @@ late_initcall(sched_init_ops);
 static void acquire_rq_locks_irqsave(const cpumask_t *cpus,
 				     unsigned long *flags)
 {
-	int cpu;
+	int cpu, level = 0;
 
 	local_irq_save(*flags);
-	for_each_cpu(cpu, cpus)
-		raw_spin_lock(&cpu_rq(cpu)->lock);
+	for_each_cpu(cpu, cpus) {
+		if (level == 0)
+			raw_spin_lock(&cpu_rq(cpu)->lock);
+		else
+			raw_spin_lock_nested(&cpu_rq(cpu)->lock, level);
+		level++;
+	}
 }
 
 static void release_rq_locks_irqrestore(const cpumask_t *cpus,
@@ -303,12 +309,7 @@ update_window_start(struct rq *rq, u64 wallclock, int event)
 	u64 old_window_start = rq->window_start;
 
 	delta = wallclock - rq->window_start;
-	/* If the MPM global timer is cleared, set delta as 0 to avoid kernel BUG happening */
-	if (delta < 0) {
-		delta = 0;
-		WARN_ONCE(1, "WALT wallclock appears to have gone backwards or reset\n");
-	}
-
+	BUG_ON(delta < 0);
 	if (delta < sched_ravg_window)
 		return old_window_start;
 
@@ -358,10 +359,21 @@ static void update_task_cpu_cycles(struct task_struct *p, int cpu,
 		p->cpu_cycles = read_cycle_counter(cpu, wallclock);
 }
 
+static inline bool is_ed_enabled(void)
+{
+	return (walt_rotation_enabled || (sched_boost_policy() !=
+		SCHED_BOOST_NONE));
+}
+
 void clear_ed_task(struct task_struct *p, struct rq *rq)
 {
 	if (p == rq->ed_task)
 		rq->ed_task = NULL;
+}
+
+static inline bool is_ed_task(struct task_struct *p, u64 wallclock)
+{
+	return (wallclock - p->last_wake_ts >= EARLY_DETECTION_DURATION);
 }
 
 bool early_detection_notify(struct rq *rq, u64 wallclock)
@@ -371,15 +383,14 @@ bool early_detection_notify(struct rq *rq, u64 wallclock)
 
 	rq->ed_task = NULL;
 
-	if ((!walt_rotation_enabled && sched_boost_policy() ==
-			SCHED_BOOST_NONE) || !rq->cfs.h_nr_running)
+	if (!is_ed_enabled() || !rq->cfs.h_nr_running)
 		return 0;
 
 	list_for_each_entry(p, &rq->cfs_tasks, se.group_node) {
 		if (!loop_max)
 			break;
 
-		if (wallclock - p->last_wake_ts >= EARLY_DETECTION_DURATION) {
+		if (is_ed_task(p, wallclock)) {
 			rq->ed_task = p;
 			return 1;
 		}
@@ -878,13 +889,19 @@ void fixup_busy_time(struct task_struct *p, int new_cpu)
 
 	migrate_top_tasks(p, src_rq, dest_rq);
 
-	if (!same_freq_domain(new_cpu, task_cpu(p)))
+	if (!same_freq_domain(new_cpu, task_cpu(p))) {
+		src_rq->notif_pending = true;
+		dest_rq->notif_pending = true;
 		irq_work_queue(&walt_migration_irq_work);
+	}
 
-	if (p == src_rq->ed_task) {
-		src_rq->ed_task = NULL;
-		if (!dest_rq->ed_task)
+	if (is_ed_enabled()) {
+		if (p == src_rq->ed_task) {
+			src_rq->ed_task = NULL;
 			dest_rq->ed_task = p;
+		} else if (is_ed_task(p, wallclock)) {
+			dest_rq->ed_task = p;
+		}
 	}
 
 done:
@@ -903,6 +920,9 @@ void set_window_start(struct rq *rq)
 		rq->window_start = 1;
 		sync_cpu_available = 1;
 		atomic64_set(&walt_irq_work_lastq_ws, rq->window_start);
+		walt_load_reported_window =
+					atomic64_read(&walt_irq_work_lastq_ws);
+
 	} else {
 		struct rq *sync_rq = cpu_rq(cpumask_any(cpu_online_mask));
 
@@ -1658,6 +1678,13 @@ account_busy_for_task_demand(struct rq *rq, struct task_struct *p, int event)
 		return 0;
 
 	/*
+	 * The idle exit time is not accounted for the first task _picked_ up to
+	 * run on the idle CPU.
+	 */
+	if (event == PICK_NEXT_TASK && rq->curr == rq->idle)
+		return 0;
+
+	/*
 	 * TASK_UPDATE can be called on sleeping task, when its moved between
 	 * related groups
 	 */
@@ -1965,12 +1992,16 @@ void update_task_ravg(struct task_struct *p, struct rq *rq, int event,
 	update_task_demand(p, rq, event, wallclock);
 	update_cpu_busy_time(p, rq, event, wallclock, irqtime);
 	update_task_pred_demand(rq, p, event);
-done:
+
+	if (exiting_task(p))
+		goto done;
+
 	trace_sched_update_task_ravg(p, rq, event, wallclock, irqtime,
 				rq->cc.cycles, rq->cc.time, &rq->grp_time);
 	trace_sched_update_task_ravg_mini(p, rq, event, wallclock, irqtime,
 				rq->cc.cycles, rq->cc.time, &rq->grp_time);
 
+done:
 	p->ravg.mark_start = wallclock;
 
 	run_walt_irq_work(old_window_start, rq);
@@ -1991,7 +2022,7 @@ int sched_set_init_task_load(struct task_struct *p, int init_load_pct)
 	return 0;
 }
 
-void init_new_task_load(struct task_struct *p, bool idle_task)
+void init_new_task_load(struct task_struct *p)
 {
 	int i;
 	u32 init_load_windows;
@@ -2009,9 +2040,6 @@ void init_new_task_load(struct task_struct *p, bool idle_task)
 	/* Don't have much choice. CPU frequency would be bogus */
 	BUG_ON(!p->ravg.curr_window_cpu || !p->ravg.prev_window_cpu);
 
-	if (idle_task)
-		return;
-
 	if (current->init_load_pct)
 		init_load_pct = current->init_load_pct;
 	else
@@ -2028,6 +2056,10 @@ void init_new_task_load(struct task_struct *p, bool idle_task)
 	p->misfit = false;
 }
 
+/*
+ * kfree() may wakeup kswapd. So this function should NOT be called
+ * with any CPU's rq->lock acquired.
+ */
 void free_task_load_ptrs(struct task_struct *p)
 {
 	kfree(p->ravg.curr_window_cpu);
@@ -2174,7 +2206,7 @@ static int compute_max_possible_capacity(struct sched_cluster *cluster)
 	return capacity;
 }
 
-static void update_min_max_capacity(void)
+void walt_update_min_max_capacity(void)
 {
 	unsigned long flags;
 
@@ -2400,7 +2432,7 @@ static int cpufreq_notifier_policy(struct notifier_block *nb,
 		return 0;
 
 	if (val == CPUFREQ_REMOVE_POLICY || val == CPUFREQ_CREATE_POLICY) {
-		update_min_max_capacity();
+		walt_update_min_max_capacity();
 		return 0;
 	}
 
@@ -3160,16 +3192,23 @@ void walt_irq_work(struct irq_work *irq_work)
 	struct rq *rq;
 	int cpu;
 	u64 wc;
-	int flag = SCHED_CPUFREQ_WALT;
+	bool is_migration = false;
+	int level = 0;
 
 	/* Am I the window rollover work or the migration work? */
 	if (irq_work == &walt_migration_irq_work)
-		flag |= SCHED_CPUFREQ_INTERCLUSTER_MIG;
+		is_migration = true;
 
-	for_each_cpu(cpu, cpu_possible_mask)
-		raw_spin_lock(&cpu_rq(cpu)->lock);
+	for_each_cpu(cpu, cpu_possible_mask) {
+		if (level == 0)
+			raw_spin_lock(&cpu_rq(cpu)->lock);
+		else
+			raw_spin_lock_nested(&cpu_rq(cpu)->lock, level);
+		level++;
+	}
 
 	wc = sched_ktime_clock();
+	walt_load_reported_window = atomic64_read(&walt_irq_work_lastq_ws);
 
 	for_each_sched_cluster(cluster) {
 		u64 aggr_grp_load = 0;
@@ -3191,14 +3230,29 @@ void walt_irq_work(struct irq_work *irq_work)
 		raw_spin_unlock(&cluster->load_lock);
 	}
 
-	for_each_sched_cluster(cluster)
-		for_each_cpu(cpu, &cluster->cpus)
-			cpufreq_update_util(cpu_rq(cpu), flag);
+	for_each_sched_cluster(cluster) {
+		for_each_cpu(cpu, &cluster->cpus) {
+			int nflag = 0;
+
+			rq = cpu_rq(cpu);
+
+			if (is_migration) {
+				if (rq->notif_pending) {
+					nflag = SCHED_CPUFREQ_INTERCLUSTER_MIG;
+					rq->notif_pending = false;
+				} else {
+					nflag = SCHED_CPUFREQ_FORCE_UPDATE;
+				}
+			}
+
+			cpufreq_update_util(rq, nflag);
+		}
+	}
 
 	for_each_cpu(cpu, cpu_possible_mask)
 		raw_spin_unlock(&cpu_rq(cpu)->lock);
 
-	if (irq_work != &walt_migration_irq_work)
+	if (!is_migration)
 		core_ctl_check(this_rq()->window_start);
 }
 
@@ -3296,6 +3350,7 @@ void walt_sched_init(struct rq *rq)
 		clear_top_tasks_bitmap(rq->top_tasks_bitmap[j]);
 	}
 	rq->cum_window_demand = 0;
+	rq->notif_pending = false;
 
 	walt_cpu_util_freq_divisor =
 	    (sched_ravg_window >> SCHED_CAPACITY_SHIFT) * 100;

@@ -23,6 +23,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/uaccess.h>
+#include <asm/arch_timer.h>
 #include <soc/qcom/smem.h>
 #include "rpmh_master_stat.h"
 
@@ -57,7 +58,8 @@ enum profile_data {
 	POWER_UP_END,
 	POWER_DOWN_END,
 	POWER_UP_START,
-	NUM_UNIT,
+	ALT_UNIT,
+	NUM_UNIT = ALT_UNIT,
 };
 
 struct msm_rpmh_master_data {
@@ -95,6 +97,7 @@ struct rpmh_master_stats_prv_data {
 
 static struct msm_rpmh_master_stats apss_master_stats;
 static void __iomem *rpmh_unit_base;
+static uint32_t use_alt_unit;
 
 static DEFINE_MUTEX(rpmh_stats_mutex);
 
@@ -102,6 +105,18 @@ static ssize_t msm_rpmh_master_stats_print_data(char *prvbuf, ssize_t length,
 				struct msm_rpmh_master_stats *record,
 				const char *name)
 {
+	uint64_t temp_accumulated_duration = record->accumulated_duration;
+	/*
+	 * If a master is in sleep when reading the sleep stats from SMEM
+	 * adjust the accumulated sleep duration to show actual sleep time.
+	 * This ensures that the displayed stats are real when used for
+	 * the purpose of computing battery utilization.
+	 */
+	if (record->last_entered > record->last_exited)
+		temp_accumulated_duration +=
+				(arch_counter_get_cntvct()
+				- record->last_entered);
+
 	return snprintf(prvbuf, length, "%s\n\tVersion:0x%x\n"
 			"\tSleep Count:0x%x\n"
 			"\tSleep Last Entered At:0x%llx\n"
@@ -109,7 +124,7 @@ static ssize_t msm_rpmh_master_stats_print_data(char *prvbuf, ssize_t length,
 			"\tSleep Accumulated Duration:0x%llx\n\n",
 			name, record->version_id, record->counts,
 			record->last_entered, record->last_exited,
-			record->accumulated_duration);
+			temp_accumulated_duration);
 }
 
 static ssize_t msm_rpmh_master_stats_show(struct kobject *kobj,
@@ -165,6 +180,17 @@ void msm_rpmh_master_stats_update(void)
 		return;
 
 	for (i = POWER_DOWN_END; i < NUM_UNIT; i++) {
+		if (i == use_alt_unit) {
+			profile_unit[i].value = readl_relaxed(
+						rpmh_unit_base + GET_ADDR(
+						REG_DATA_LO, ALT_UNIT));
+			profile_unit[i].value |= ((uint64_t)
+						readl_relaxed(
+						rpmh_unit_base + GET_ADDR(
+						REG_DATA_HI, ALT_UNIT)) << 32);
+			continue;
+		}
+
 		profile_unit[i].valid = readl_relaxed(rpmh_unit_base +
 						GET_ADDR(REG_VALID, i));
 
@@ -325,6 +351,12 @@ static int msm_rpmh_master_stats_probe(struct platform_device *pdev)
 		goto fail_sysfs;
 	}
 
+	ret = of_property_read_u32(pdev->dev.of_node,
+					"qcom,use-alt-unit",
+					&use_alt_unit);
+	if (ret)
+		use_alt_unit = -1;
+
 	rpmh_unit_base = of_iomap(pdev->dev.of_node, 0);
 	if (!rpmh_unit_base) {
 		pr_err("Failed to get rpmh_unit_base\n");
@@ -357,6 +389,7 @@ static int msm_rpmh_master_stats_remove(struct platform_device *pdev)
 	kobject_put(prvdata->kobj);
 	platform_set_drvdata(pdev, NULL);
 	iounmap(rpmh_unit_base);
+	rpmh_unit_base = NULL;
 
 	return 0;
 }

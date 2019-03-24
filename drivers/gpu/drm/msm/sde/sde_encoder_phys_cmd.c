@@ -451,11 +451,13 @@ static int _sde_encoder_phys_cmd_handle_ppdone_timeout(
 			to_sde_encoder_phys_cmd(phys_enc);
 	u32 frame_event = SDE_ENCODER_FRAME_EVENT_ERROR
 				| SDE_ENCODER_FRAME_EVENT_SIGNAL_RELEASE_FENCE;
+	u32 pending_kickoff_cnt;
 
 	if (!phys_enc || !phys_enc->hw_pp || !phys_enc->hw_ctl)
 		return -EINVAL;
 
 	cmd_enc->pp_timeout_report_cnt++;
+	pending_kickoff_cnt = atomic_read(&phys_enc->pending_kickoff_cnt);
 
 	if (sde_encoder_phys_cmd_is_master(phys_enc)) {
 		 /* trigger the retire fence if it was missed */
@@ -470,8 +472,15 @@ static int _sde_encoder_phys_cmd_handle_ppdone_timeout(
 
 	SDE_EVT32(DRMID(phys_enc->parent), phys_enc->hw_pp->idx - PINGPONG_0,
 			cmd_enc->pp_timeout_report_cnt,
-			atomic_read(&phys_enc->pending_kickoff_cnt),
+			pending_kickoff_cnt,
 			frame_event);
+
+	/* decrement the kickoff_cnt before checking for ESD status */
+	atomic_add_unless(&phys_enc->pending_kickoff_cnt, -1, 0);
+
+	/* check if panel is still sending TE signal or not */
+	if (sde_connector_esd_status(phys_enc->connector))
+		goto exit;
 
 	if (cmd_enc->pp_timeout_report_cnt >= PP_TIMEOUT_MAX_TRIALS) {
 		cmd_enc->pp_timeout_report_cnt = PP_TIMEOUT_MAX_TRIALS;
@@ -485,16 +494,15 @@ static int _sde_encoder_phys_cmd_handle_ppdone_timeout(
 				phys_enc->hw_pp->idx - PINGPONG_0,
 				phys_enc->hw_ctl->idx - CTL_0,
 				cmd_enc->pp_timeout_report_cnt,
-				atomic_read(&phys_enc->pending_kickoff_cnt));
+				pending_kickoff_cnt);
 
 		SDE_EVT32(DRMID(phys_enc->parent), SDE_EVTLOG_FATAL);
 	}
 
-	atomic_add_unless(&phys_enc->pending_kickoff_cnt, -1, 0);
-
 	/* request a ctl reset before the next kickoff */
 	phys_enc->enable_state = SDE_ENC_ERR_NEEDS_HW_RESET;
 
+exit:
 	if (phys_enc->parent_ops.handle_frame_done)
 		phys_enc->parent_ops.handle_frame_done(
 				phys_enc->parent, phys_enc, frame_event);

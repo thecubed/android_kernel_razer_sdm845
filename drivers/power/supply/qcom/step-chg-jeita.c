@@ -1,4 +1,4 @@
-/* Copyright (c) 2017 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2017-2018 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -84,9 +84,12 @@ struct step_chg_info {
 
 	struct votable		*fcc_votable;
 	struct votable		*fv_votable;
+	struct votable		*usb_icl_votable;
 	struct wakeup_source	*step_chg_ws;
 	struct power_supply	*batt_psy;
 	struct power_supply	*bms_psy;
+	struct power_supply	*main_psy;
+	struct power_supply	*usb_psy;
 	struct delayed_work	status_change_work;
 	struct delayed_work	get_config_work;
 	struct notifier_block	nb;
@@ -118,6 +121,17 @@ static bool is_bms_available(struct step_chg_info *chip)
 		chip->bms_psy = power_supply_get_by_name("bms");
 
 	if (!chip->bms_psy)
+		return false;
+
+	return true;
+}
+
+static bool is_usb_available(struct step_chg_info *chip)
+{
+	if (!chip->usb_psy)
+		chip->usb_psy = power_supply_get_by_name("usb");
+
+	if (!chip->usb_psy)
 		return false;
 
 	return true;
@@ -381,20 +395,46 @@ static int get_val(struct range_data *range, int hysteresis, int current_index,
 	int i;
 
 	*new_index = -EINVAL;
-	/* first find the matching index without hysteresis */
-	for (i = 0; i < MAX_STEP_CHG_ENTRIES; i++)
+
+	/*
+	 * If the threshold is lesser than the minimum allowed range,
+	 * return -ENODATA.
+	 */
+	if (threshold < range[0].low_threshold)
+		return -ENODATA;
+
+	/* First try to find the matching index without hysteresis */
+	for (i = 0; i < MAX_STEP_CHG_ENTRIES; i++) {
+		if (!range[i].high_threshold && !range[i].low_threshold) {
+			/* First invalid table entry; exit loop */
+			break;
+		}
+
 		if (is_between(range[i].low_threshold,
 			range[i].high_threshold, threshold)) {
 			*new_index = i;
 			*val = range[i].value;
-#if defined(CONFIG_FIH_BATTERY)
 			break;
-#endif /* CONFIG_FIH_BATTERY */
+		}
+	}
+
+	/*
+	 * If nothing was found, the threshold exceeds the max range for sure
+	 * as the other case where it is lesser than the min range is handled
+	 * at the very beginning of this function. Therefore, clip it to the
+	 * max allowed range value, which is the one corresponding to the last
+	 * valid entry in the battery profile data array.
+	 */
+	if (*new_index == -EINVAL) {
+		if (i == 0) {
+			/* Battery profile data array is completely invalid */
+			return -ENODATA;
 		}
 
-	/* if nothing was found, return -ENODATA */
-	if (*new_index == -EINVAL)
-		return -ENODATA;
+		*new_index = (i - 1);
+		*val = range[*new_index].value;
+	}
+
 	/*
 	 * If we don't have a current_index return this
 	 * newfound value. There is no hysterisis from out of range
@@ -502,6 +542,7 @@ reschedule:
 	return (STEP_CHG_HYSTERISIS_DELAY_US - elapsed_us + 1000);
 }
 
+#define JEITA_SUSPEND_HYST_UV		50000
 static int handle_jeita(struct step_chg_info *chip)
 {
 	union power_supply_propval jeita_pval = {0, }; //Only use hysteresis when JEITA change from noraml to cool or warm
@@ -525,6 +566,8 @@ static int handle_jeita(struct step_chg_info *chip)
 			vote(chip->fcc_votable, JEITA_VOTER, false, 0);
 		if (chip->fv_votable)
 			vote(chip->fv_votable, JEITA_VOTER, false, 0);
+		if (chip->usb_icl_votable)
+			vote(chip->usb_icl_votable, JEITA_VOTER, false, 0);
 		return 0;
 	}
 
@@ -558,12 +601,9 @@ static int handle_jeita(struct step_chg_info *chip)
 			chip->last_jeita_status,
 			jeita_pval.intval);
 	//}Only use hysteresis when JEITA change from noraml to cool or warm
-	if (rc < 0) {
-		/* remove the vote if no step-based fcc is found */
-		if (chip->fcc_votable)
-			vote(chip->fcc_votable, JEITA_VOTER, false, 0);
-		goto update_time;
-	}
+
+	if (rc < 0)
+		fcc_ua = 0;
 
 	if (!chip->fcc_votable)
 		chip->fcc_votable = find_votable("FCC");
@@ -571,7 +611,7 @@ static int handle_jeita(struct step_chg_info *chip)
 		/* changing FCC is a must */
 		return -EINVAL;
 
-	vote(chip->fcc_votable, JEITA_VOTER, true, fcc_ua);
+	vote(chip->fcc_votable, JEITA_VOTER, fcc_ua ? true : false, fcc_ua);
 
 	//{Only use hysteresis when JEITA change from noraml to cool or warm
 	rc = power_supply_get_property(chip->batt_psy,
@@ -586,18 +626,46 @@ static int handle_jeita(struct step_chg_info *chip)
 			chip->last_jeita_status,
 			jeita_pval.intval);
 	//}Only use hysteresis when JEITA change from noraml to cool or warm
-	if (rc < 0) {
-		/* remove the vote if no step-based fcc is found */
-		if (chip->fv_votable)
-			vote(chip->fv_votable, JEITA_VOTER, false, 0);
-		goto update_time;
-	}
+
+	if (rc < 0)
+		fv_uv = 0;
 
 	chip->fv_votable = find_votable("FV");
 	if (!chip->fv_votable)
 		goto update_time;
 
-	vote(chip->fv_votable, JEITA_VOTER, true, fv_uv);
+	if (!chip->usb_icl_votable)
+		chip->usb_icl_votable = find_votable("USB_ICL");
+
+	if (!chip->usb_icl_votable)
+		goto set_jeita_fv;
+
+	/*
+	 * If JEITA float voltage is same as max-vfloat of battery then
+	 * skip any further VBAT specific checks.
+	 */
+	rc = power_supply_get_property(chip->batt_psy,
+				POWER_SUPPLY_PROP_VOLTAGE_MAX, &pval);
+	if (rc || (pval.intval == fv_uv)) {
+		vote(chip->usb_icl_votable, JEITA_VOTER, false, 0);
+		goto set_jeita_fv;
+	}
+
+	/*
+	 * Suspend USB input path if battery voltage is above
+	 * JEITA VFLOAT threshold.
+	 */
+	if (fv_uv > 0) {
+		rc = power_supply_get_property(chip->batt_psy,
+				POWER_SUPPLY_PROP_VOLTAGE_NOW, &pval);
+		if (!rc && (pval.intval > fv_uv))
+			vote(chip->usb_icl_votable, JEITA_VOTER, true, 0);
+		else if (pval.intval < (fv_uv - JEITA_SUSPEND_HYST_UV))
+			vote(chip->usb_icl_votable, JEITA_VOTER, false, 0);
+	}
+
+set_jeita_fv:
+	vote(chip->fv_votable, JEITA_VOTER, fv_uv ? true : false, fv_uv);
 
 #if defined(CONFIG_FIH_BATTERY)
 	if (current_jeita_fcc_index != chip->jeita_fcc_index ||
@@ -609,6 +677,12 @@ static int handle_jeita(struct step_chg_info *chip)
 update_time:
 	chip->last_jeita_status = jeita_pval.intval; //Only use hysteresis when JEITA change from noraml to cool or warm
 	chip->jeita_last_update_time = ktime_get();
+
+	if (!chip->main_psy)
+		chip->main_psy = power_supply_get_by_name("main");
+	if (chip->main_psy)
+		power_supply_changed(chip->main_psy);
+
 	return 0;
 
 reschedule:
@@ -657,11 +731,13 @@ static void status_change_work(struct work_struct *work)
 	int reschedule_us;
 	int reschedule_jeita_work_us = 0;
 	int reschedule_step_work_us = 0;
+	union power_supply_propval prop = {0, };
 
 	if (!is_batt_available(chip))
-		return;
+		goto exit_work;
 
 	handle_battery_insertion(chip);
+
 	/* skip elapsed_us debounce for handling battery temperature */
 	rc = handle_jeita(chip);
 	if (rc > 0)
@@ -675,12 +751,28 @@ static void status_change_work(struct work_struct *work)
 	if (rc < 0)
 		pr_err("Couldn't handle step rc = %d\n", rc);
 
+	/* Remove stale votes on USB removal */
+	if (is_usb_available(chip)) {
+		prop.intval = 0;
+		power_supply_get_property(chip->usb_psy,
+				POWER_SUPPLY_PROP_PRESENT, &prop);
+		if (!prop.intval) {
+			if (chip->usb_icl_votable)
+				vote(chip->usb_icl_votable, JEITA_VOTER,
+						false, 0);
+		}
+	}
+
 	reschedule_us = min(reschedule_jeita_work_us, reschedule_step_work_us);
 	if (reschedule_us == 0)
-		__pm_relax(chip->step_chg_ws);
+		goto exit_work;
 	else
 		schedule_delayed_work(&chip->status_change_work,
 				usecs_to_jiffies(reschedule_us));
+	return;
+
+exit_work:
+	__pm_relax(chip->step_chg_ws);
 }
 
 static int step_chg_notifier_call(struct notifier_block *nb,
@@ -692,7 +784,8 @@ static int step_chg_notifier_call(struct notifier_block *nb,
 	if (ev != PSY_EVENT_PROP_CHANGED)
 		return NOTIFY_OK;
 
-	if ((strcmp(psy->desc->name, "battery") == 0)) {
+	if ((strcmp(psy->desc->name, "battery") == 0)
+			|| (strcmp(psy->desc->name, "usb") == 0)) {
 		__pm_stay_awake(chip->step_chg_ws);
 		schedule_delayed_work(&chip->status_change_work, 0);
 	}

@@ -21,6 +21,10 @@ config GENERIC_IRQ_SHOW
 config GENERIC_IRQ_SHOW_LEVEL
        bool
 
+# Supports effective affinity mask
+config GENERIC_IRQ_EFFECTIVE_AFF_MASK
+       bool
+
 # Facility to allocate a hardware interrupt. This is legacy support
 # and should not be used in new code. Use irq domains instead.
 config GENERIC_IRQ_LEGACY_ALLOC_HWIRQ
@@ -58,6 +62,11 @@ config GENERIC_IRQ_CHIP
 # Generic irq_domain hw <--> linux irq number translation
 config IRQ_DOMAIN
 	bool
+
+# Support for simulated interrupts
+config IRQ_SIM
+	bool
+	select IRQ_WORK
 
 # Support for hierarchical irq domains
 config IRQ_DOMAIN_HIERARCHY

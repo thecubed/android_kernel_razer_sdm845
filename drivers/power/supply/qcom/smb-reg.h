@@ -1,4 +1,4 @@
-/* Copyright (c) 2016-2017 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016-2018 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -587,7 +587,6 @@ enum {
 #define EN_LEGACY_CABLE_DETECTION_BIT		BIT(1)
 #define ALLOW_PD_DRING_UFP_TCCDB_BIT		BIT(0)
 
-//{QC patch: Handle QC2.0 charger collapse gracefully
 #define HVDCP_PULSE_COUNT_MAX_REG		(USBIN_BASE + 0x5B)
 #define HVDCP_PULSE_COUNT_MAX_QC2_MASK		GENMASK(7, 6)
 enum {
@@ -596,7 +595,6 @@ enum {
 	HVDCP_PULSE_COUNT_MAX_QC2_12V,
 	HVDCP_PULSE_COUNT_MAX_QC2_INVALID
 };
-//}QC patch: Handle QC2.0 charger collapse gracefully
 
 #define USBIN_ADAPTER_ALLOW_CFG_REG		(USBIN_BASE + 0x60)
 #define USBIN_ADAPTER_ALLOW_MASK		GENMASK(3, 0)

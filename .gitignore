@@ -33,6 +33,7 @@
 *.lzo
 *.patch
 *.gcno
+*.ll
 modules.builtin
 Module.symvers
 *.dwo
@@ -118,5 +119,3 @@ all.config
 # fetched Android config fragments
 kernel/configs/android-*.cfg
 
-# ig opensource/audio
-techpack/

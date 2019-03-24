@@ -62,6 +62,7 @@ struct tzbsp_resp {
 
 #define VENUS_AXI_HALT_ACK_TIMEOUT_US		500000
 
+
 enum tzbsp_video_state {
 	TZBSP_VIDEO_STATE_SUSPEND = 0,
 	TZBSP_VIDEO_STATE_RESUME = 1,
@@ -1096,6 +1097,8 @@ static int __set_clocks(struct venus_hfi_device *device, u32 freq)
 	int rc = 0;
 
 	venus_hfi_for_each_clock(device, cl) {
+		if (cl->disable_memcore_only)
+			continue;
 		if (cl->has_scaling) {/* has_scaling */
 			device->clk_freq = freq;
 			rc = clk_set_rate(cl->clk, freq);
@@ -1172,7 +1175,7 @@ static int __iface_cmdq_write_relaxed(struct venus_hfi_device *device,
 	__strict_check(device);
 
 	if (!__core_in_valid_state(device)) {
-		dprintk(VIDC_DBG, "%s - fw not in init state\n", __func__);
+		dprintk(VIDC_ERR, "%s - fw not in init state\n", __func__);
 		result = -EINVAL;
 		goto err_q_null;
 	}
@@ -2744,7 +2747,7 @@ static void venus_hfi_pm_handler(struct work_struct *work)
 {
 	int rc = 0;
 	u32 wfi_status = 0, idle_status = 0, pc_ready = 0;
-	int count = 0;
+	int pc_count = 0, idle_count = 0;
 	const int max_tries = 10;
 	struct venus_hfi_device *device = list_first_entry(
 			&hal_ctxt.dev_head, struct venus_hfi_device, list);
@@ -2793,8 +2796,16 @@ static void venus_hfi_pm_handler(struct work_struct *work)
 				wfi_status);
 			goto skip_power_off;
 		}
-		if (device->res->sys_idle_indicator &&
-			!(idle_status & BIT(30))) {
+		while (device->res->sys_idle_indicator &&
+				idle_count < max_tries) {
+			if (idle_status & BIT(30))
+				break;
+			usleep_range(50, 100);
+			idle_status = __read_register(device,
+				VIDC_CPU_CS_SCIACMDARG0);
+			idle_count++;
+		}
+		if (idle_count == max_tries) {
 			dprintk(VIDC_WARN,
 				"Skipping PC as idle_status (%#x) bit not set\n",
 				idle_status);
@@ -2807,7 +2818,7 @@ static void venus_hfi_pm_handler(struct work_struct *work)
 			goto skip_power_off;
 		}
 
-		while (count < max_tries) {
+		while (pc_count < max_tries) {
 			wfi_status = __read_register(device,
 					VIDC_WRAPPER_CPU_STATUS);
 			pc_ready = __read_register(device,
@@ -2816,10 +2827,10 @@ static void venus_hfi_pm_handler(struct work_struct *work)
 				VIDC_CPU_CS_SCIACMDARG0_HFI_CTRL_PC_READY))
 				break;
 			usleep_range(150, 250);
-			count++;
+			pc_count++;
 		}
 
-		if (count == max_tries) {
+		if (pc_count == max_tries) {
 			dprintk(VIDC_ERR,
 					"Skip PC. Core is not in right state (%#x, %#x)\n",
 					wfi_status, pc_ready);
@@ -2858,7 +2869,7 @@ static int __halt_axi(struct venus_hfi_device *device)
 	int rc = 0;
 
 	if (!device) {
-		dprintk(VIDC_ERR, "Invalid input: %pK\n", device);
+		dprintk(VIDC_ERR, "Invalid input\n");
 		return -EINVAL;
 	}
 
@@ -2892,8 +2903,6 @@ static int __halt_axi(struct venus_hfi_device *device)
 static void __process_sys_error(struct venus_hfi_device *device)
 {
 	struct hfi_sfr_struct *vsfr = NULL;
-
-	__set_state(device, VENUS_STATE_DEINIT);
 
 	if (__halt_axi(device))
 		dprintk(VIDC_WARN, "Failed to halt AXI after SYS_ERROR\n");
@@ -3152,6 +3161,10 @@ static int __response_handler(struct venus_hfi_device *device)
 					"Too many packets in message queue to handle at once, deferring read\n");
 			break;
 		}
+
+		/* do not read packets after sys error packet */
+		if (info->response_type == HAL_SYS_ERROR)
+			break;
 	}
 
 	if (requeue_pm_work && device->res->sw_power_collapsible) {
@@ -3216,6 +3229,12 @@ err_no_work:
 		struct msm_vidc_cb_info *r = &device->response_pkt[i];
 		dprintk(VIDC_DBG, "Processing response %d of %d, type %d\n",
 			(i + 1), num_responses, r->response_type);
+		if (!__core_in_valid_state(device)) {
+			dprintk(VIDC_ERR,
+				"Ignore responses from %d to %d as device is in invalid state",
+				(i + 1), num_responses);
+			break;
+		}
 		device->callback(r->response_type, &r->response);
 	}
 
@@ -3361,6 +3380,8 @@ static inline void __disable_unprepare_clks(struct venus_hfi_device *device)
 	}
 
 	venus_hfi_for_each_clock_reverse(device, cl) {
+		if (cl->disable_memcore_only)
+			continue;
 		dprintk(VIDC_DBG, "Clock: %s disable and unprepare\n",
 				cl->name);
 		rc = clk_set_flags(cl->clk, CLKFLAG_NORETAIN_PERIPH);
@@ -3390,6 +3411,11 @@ static inline int __prepare_enable_clks(struct venus_hfi_device *device)
 	}
 
 	venus_hfi_for_each_clock(device, cl) {
+		/* MEM CORE is ON by default. Unset it for unused clocks*/
+		if (cl->disable_memcore_only) {
+			clk_set_flags(cl->clk, CLKFLAG_NORETAIN_MEM);
+			continue;
+		}
 		/*
 		 * For the clocks we control, set the rate prior to preparing
 		 * them.  Since we don't really have a load at this point, scale
@@ -3427,6 +3453,8 @@ static inline int __prepare_enable_clks(struct venus_hfi_device *device)
 
 fail_clk_enable:
 	venus_hfi_for_each_clock_reverse_continue(device, cl, c) {
+		if (cl->disable_memcore_only)
+			continue;
 		dprintk(VIDC_ERR, "Clock: %s disable and unprepare\n",
 			cl->name);
 		clk_disable_unprepare(cl->clk);
@@ -3520,7 +3548,6 @@ static int __init_bus(struct venus_hfi_device *device)
 		devfreq_suspend_device(bus->devfreq);
 	}
 
-	device->bus_vote = DEFAULT_BUS_VOTE;
 	return 0;
 
 err_add_dev:

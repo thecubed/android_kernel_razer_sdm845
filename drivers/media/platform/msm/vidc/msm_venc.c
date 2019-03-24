@@ -24,6 +24,14 @@
 #define BIT_RATE_STEP 1
 #define DEFAULT_FRAME_RATE 15
 #define OPERATING_FRAME_RATE_STEP (1 << 16)
+#define MIN_FRAME_QUALITY 0
+#define MAX_FRAME_QUALITY 100
+#define DEFAULT_FRAME_QUALITY 80
+#define FRAME_QUALITY_STEP 1
+#define MIN_GRID_DIMENSION 512
+#define MAX_GRID_DIMENSION 8192
+#define DEFAULT_GRID_DIMENSION 512
+#define GRID_DIMENSION_STEP 256
 #define MAX_SLICE_BYTE_SIZE ((MAX_BIT_RATE)>>3)
 #define MIN_SLICE_BYTE_SIZE 512
 #define MAX_SLICE_MB_SIZE ((4096 * 2304) >> 8)
@@ -50,6 +58,7 @@ static const char *const mpeg_video_rate_control[] = {
 	"CBR CFR",
 	"MBR CFR",
 	"MBR VFR",
+	"CQ",
 	NULL
 };
 
@@ -358,7 +367,7 @@ static struct msm_vidc_ctrl msm_venc_ctrls[] = {
 		.name = "Video Framerate and Bitrate Control",
 		.type = V4L2_CTRL_TYPE_MENU,
 		.minimum = V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_OFF,
-		.maximum = V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_MBR_VFR,
+		.maximum = V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_CQ,
 		.default_value = V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_OFF,
 		.step = 0,
 		.menu_skip_mask = ~(
@@ -368,9 +377,33 @@ static struct msm_vidc_ctrl msm_venc_ctrls[] = {
 		(1 << V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_CBR_VFR) |
 		(1 << V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_CBR_CFR) |
 		(1 << V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_MBR_CFR) |
-		(1 << V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_MBR_VFR)
+		(1 << V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_MBR_VFR) |
+		(1 << V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_CQ)
 		),
 		.qmenu = mpeg_video_rate_control,
+	},
+	{
+		.id = V4L2_CID_MPEG_VIDC_VIDEO_FRAME_QUALITY,
+		.name = "Frame quality",
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.minimum = MIN_FRAME_QUALITY,
+		.maximum = MAX_FRAME_QUALITY,
+		.default_value = DEFAULT_FRAME_QUALITY,
+		.step = FRAME_QUALITY_STEP,
+		.menu_skip_mask = 0,
+		.qmenu = NULL,
+	},
+	{
+		.id = V4L2_CID_MPEG_VIDC_IMG_GRID_DIMENSION,
+		.name = "Image grid",
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.minimum = MIN_GRID_DIMENSION,
+		.maximum = MAX_GRID_DIMENSION,
+		.default_value = DEFAULT_GRID_DIMENSION,
+		.step = GRID_DIMENSION_STEP,
+		.menu_skip_mask = 0,
+		.qmenu = NULL,
+		.flags = V4L2_CTRL_FLAG_VOLATILE,
 	},
 	{
 		.id = V4L2_CID_MPEG_VIDEO_BITRATE,
@@ -705,7 +738,7 @@ static struct msm_vidc_ctrl msm_venc_ctrls[] = {
 			(1 << V4L2_MPEG_VIDC_EXTRADATA_METADATA_MBI) |
 			(1 << V4L2_MPEG_VIDC_EXTRADATA_YUV_STATS)|
 			(1 << V4L2_MPEG_VIDC_EXTRADATA_ROI_QP)|
-			(1UL << V4L2_MPEG_VIDC_EXTRADATA_ENC_FRAME_QP)
+			(1 << V4L2_MPEG_VIDC_EXTRADATA_PQ_INFO)
 			),
 		.qmenu = mpeg_video_vidc_extradata,
 	},
@@ -1360,7 +1393,6 @@ int msm_venc_s_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 	struct hal_h264_entropy_control h264_entropy_control;
 	struct hal_intra_period intra_period;
 	struct hal_idr_period idr_period;
-	struct hal_vpe_rotation vpe_rotation;
 	struct hal_intra_refresh intra_refresh;
 	struct hal_multi_slice_control multi_slice_control;
 	struct hal_h264_db_control h264_db_control;
@@ -1383,6 +1415,8 @@ int msm_venc_s_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 	enum hal_iframesize_type iframesize_type = HAL_IFRAMESIZE_TYPE_DEFAULT;
 	u32 color_primaries, custom_matrix;
 	struct hal_nal_stream_format_select stream_format;
+	struct hal_heic_frame_quality frame_quality;
+	struct hal_heic_grid_enable grid_enable;
 
 	if (!inst || !inst->core || !inst->core->device) {
 		dprintk(VIDC_ERR, "%s invalid parameters\n", __func__);
@@ -1483,6 +1517,13 @@ int msm_venc_s_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 			rc = -ENOTSUPP;
 			break;
 		}
+		if ((ctrl->val ==
+				V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_CQ) &&
+			inst->fmts[CAPTURE_PORT].fourcc != V4L2_PIX_FMT_HEVC) {
+			dprintk(VIDC_ERR, "CQ supported only for HEVC\n");
+			rc = -ENOTSUPP;
+			break;
+		}
 		property_id = HAL_PARAM_VENC_RATE_CONTROL;
 		property_val = ctrl->val;
 		pdata = &property_val;
@@ -1495,6 +1536,31 @@ int msm_venc_s_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 		bitrate.layer_id = MSM_VIDC_ALL_LAYER_ID;
 		pdata = &bitrate;
 		inst->clk_data.bitrate = ctrl->val;
+		break;
+	}
+	case V4L2_CID_MPEG_VIDC_VIDEO_FRAME_QUALITY:
+	{
+		property_id = HAL_CONFIG_HEIC_FRAME_QUALITY;
+		frame_quality.frame_quality = ctrl->val;
+		pdata = &frame_quality;
+		break;
+	}
+	case V4L2_CID_MPEG_VIDC_IMG_GRID_DIMENSION:
+	{
+		property_id = HAL_CONFIG_HEIC_GRID_ENABLE;
+		if (inst->fmts[CAPTURE_PORT].fourcc != V4L2_PIX_FMT_HEVC) {
+			dprintk(VIDC_ERR, "Grid is supported only for HEVC\n");
+			rc = -ENOTSUPP;
+			break;
+		}
+		if (ctrl->val == 0) {
+			dprintk(VIDC_ERR, "Dimension 0 is not supported\n");
+			rc = -ENOTSUPP;
+			break;
+		}
+		grid_enable.grid_enable = ctrl->val;
+		inst->img_grid_dimension = ctrl->val;
+		pdata = &grid_enable;
 		break;
 	}
 	case V4L2_CID_MPEG_VIDEO_BITRATE_PEAK:
@@ -1625,28 +1691,12 @@ int msm_venc_s_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_MPEG_VIDC_VIDEO_ROTATION:
 	{
-		temp_ctrl = TRY_GET_CTRL(V4L2_CID_MPEG_VIDC_VIDEO_FLIP);
-		property_id = HAL_PARAM_VPE_ROTATION;
-		vpe_rotation.rotate = msm_comm_v4l2_to_hal(
-				V4L2_CID_MPEG_VIDC_VIDEO_ROTATION,
-				ctrl->val);
-		vpe_rotation.flip = msm_comm_v4l2_to_hal(
-				V4L2_CID_MPEG_VIDC_VIDEO_FLIP,
-				temp_ctrl->val);
-		pdata = &vpe_rotation;
+		dprintk(VIDC_DBG, "Rotation %d\n", ctrl->val);
 		break;
 	}
 	case V4L2_CID_MPEG_VIDC_VIDEO_FLIP:
 	{
-		temp_ctrl = TRY_GET_CTRL(V4L2_CID_MPEG_VIDC_VIDEO_ROTATION);
-		property_id = HAL_PARAM_VPE_ROTATION;
-		vpe_rotation.rotate = msm_comm_v4l2_to_hal(
-				V4L2_CID_MPEG_VIDC_VIDEO_ROTATION,
-				temp_ctrl->val);
-		vpe_rotation.flip = msm_comm_v4l2_to_hal(
-				V4L2_CID_MPEG_VIDC_VIDEO_FLIP,
-				ctrl->val);
-		pdata = &vpe_rotation;
+		dprintk(VIDC_DBG, "Flip %d\n", ctrl->val);
 		break;
 	}
 	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE: {
@@ -1896,7 +1946,7 @@ int msm_venc_s_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDC_VIDEO_USELTRFRAME:
 		property_id = HAL_CONFIG_VENC_USELTRFRAME;
 		use_ltr.ref_ltr = ctrl->val;
-		use_ltr.use_constraint = false;
+		use_ltr.use_constraint = true;
 		use_ltr.frames = 0;
 		pdata = &use_ltr;
 		break;
@@ -2172,6 +2222,7 @@ int msm_venc_s_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 			enable.enable = 0;
 		pdata = &enable;
 		inst->clk_data.low_latency_mode = (bool) enable.enable;
+		msm_dcvs_try_enable(inst);
 		break;
 	}
 	case V4L2_CID_MPEG_VIDC_VIDEO_H264_TRANSFORM_8x8:

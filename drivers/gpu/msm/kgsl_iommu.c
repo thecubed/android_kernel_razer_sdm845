@@ -35,6 +35,7 @@
 #include "kgsl_pwrctrl.h"
 
 #define CP_APERTURE_REG	0
+#define CP_SMMU_APERTURE_ID 0x1B
 
 #define _IOMMU_PRIV(_mmu) (&((_mmu)->priv.iommu))
 
@@ -261,13 +262,12 @@ static void kgsl_setup_qdss_desc(struct kgsl_device *device)
 		return;
 	}
 
-	gpu_qdss_desc.flags = 0;
+	kgsl_memdesc_init(device, &gpu_qdss_desc, 0);
 	gpu_qdss_desc.priv = 0;
 	gpu_qdss_desc.physaddr = gpu_qdss_entry[0];
 	gpu_qdss_desc.size = gpu_qdss_entry[1];
 	gpu_qdss_desc.pagetable = NULL;
 	gpu_qdss_desc.ops = NULL;
-	gpu_qdss_desc.dev = device->dev->parent;
 	gpu_qdss_desc.hostptr = NULL;
 
 	result = memdesc_sg_dma(&gpu_qdss_desc, gpu_qdss_desc.physaddr,
@@ -306,13 +306,12 @@ static void kgsl_setup_qtimer_desc(struct kgsl_device *device)
 		return;
 	}
 
-	gpu_qtimer_desc.flags = 0;
+	kgsl_memdesc_init(device, &gpu_qtimer_desc, 0);
 	gpu_qtimer_desc.priv = 0;
 	gpu_qtimer_desc.physaddr = gpu_qtimer_entry[0];
 	gpu_qtimer_desc.size = gpu_qtimer_entry[1];
 	gpu_qtimer_desc.pagetable = NULL;
 	gpu_qtimer_desc.ops = NULL;
-	gpu_qtimer_desc.dev = device->dev->parent;
 	gpu_qtimer_desc.hostptr = NULL;
 
 	result = memdesc_sg_dma(&gpu_qtimer_desc, gpu_qtimer_desc.physaddr,
@@ -788,6 +787,10 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 		fault_type = "translation";
 	else if (flags & IOMMU_FAULT_PERMISSION)
 		fault_type = "permission";
+	else if (flags & IOMMU_FAULT_EXTERNAL)
+		fault_type = "external";
+	else if (flags & IOMMU_FAULT_TRANSACTION_STALLED)
+		fault_type = "transaction stalled";
 
 	if (kgsl_iommu_suppress_pagefault(addr, write, context)) {
 		iommu->pagefault_suppression_count++;
@@ -1174,7 +1177,7 @@ static int program_smmu_aperture(unsigned int cb, unsigned int aperture_reg)
 	desc.args[3] = 0xFFFFFFFF;
 	desc.arginfo = SCM_ARGS(4);
 
-	return scm_call2(SCM_SIP_FNID(SCM_SVC_MP, 0x1B), &desc);
+	return scm_call2(SCM_SIP_FNID(SCM_SVC_MP, CP_SMMU_APERTURE_ID), &desc);
 }
 
 static int _init_global_pt(struct kgsl_mmu *mmu, struct kgsl_pagetable *pt)
@@ -1217,7 +1220,8 @@ static int _init_global_pt(struct kgsl_mmu *mmu, struct kgsl_pagetable *pt)
 		goto done;
 	}
 
-	if (!MMU_FEATURE(mmu, KGSL_MMU_GLOBAL_PAGETABLE)) {
+	if (!MMU_FEATURE(mmu, KGSL_MMU_GLOBAL_PAGETABLE) &&
+		scm_is_call_available(SCM_SVC_MP, CP_SMMU_APERTURE_ID)) {
 		ret = program_smmu_aperture(cb_num, CP_APERTURE_REG);
 		if (ret) {
 			pr_err("SMMU aperture programming call failed with error %d\n",
@@ -1480,6 +1484,7 @@ static int _setstate_alloc(struct kgsl_device *device,
 {
 	int ret;
 
+	kgsl_memdesc_init(device, &iommu->setstate, 0);
 	ret = kgsl_sharedmem_alloc_contig(device, &iommu->setstate, PAGE_SIZE);
 
 	if (!ret) {
@@ -2525,6 +2530,7 @@ static const struct {
 } kgsl_iommu_cbs[] = {
 	{ KGSL_IOMMU_CONTEXT_USER, "gfx3d_user", },
 	{ KGSL_IOMMU_CONTEXT_SECURE, "gfx3d_secure" },
+	{ KGSL_IOMMU_CONTEXT_SECURE, "gfx3d_secure_alt" },
 };
 
 static int _kgsl_iommu_cb_probe(struct kgsl_device *device,
@@ -2532,11 +2538,19 @@ static int _kgsl_iommu_cb_probe(struct kgsl_device *device,
 {
 	struct platform_device *pdev = of_find_device_by_node(node);
 	struct kgsl_iommu_context *ctx = NULL;
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(kgsl_iommu_cbs); i++) {
 		if (!strcmp(node->name, kgsl_iommu_cbs[i].name)) {
 			int id = kgsl_iommu_cbs[i].id;
+
+			if (ADRENO_QUIRK(adreno_dev,
+				ADRENO_QUIRK_MMU_SECURE_CB_ALT)) {
+				if (!strcmp(node->name, "gfx3d_secure"))
+					continue;
+			} else if (!strcmp(node->name, "gfx3d_secure_alt"))
+				continue;
 
 			ctx = &iommu->ctx[id];
 			ctx->id = id;
@@ -2548,8 +2562,8 @@ static int _kgsl_iommu_cb_probe(struct kgsl_device *device,
 	}
 
 	if (ctx == NULL) {
-		KGSL_CORE_ERR("dt: Unknown context label %s\n", node->name);
-		return -EINVAL;
+		KGSL_CORE_ERR("dt: Unused context label %s\n", node->name);
+		return 0;
 	}
 
 	if (ctx->id == KGSL_IOMMU_CONTEXT_SECURE)
@@ -2615,7 +2629,7 @@ static int _kgsl_iommu_probe(struct kgsl_device *device,
 		return -EINVAL;
 	}
 	iommu->protect.base = reg_val[0] / sizeof(u32);
-	iommu->protect.range = ilog2(reg_val[1] / sizeof(u32));
+	iommu->protect.range = reg_val[1] / sizeof(u32);
 
 	of_property_for_each_string(node, "clock-names", prop, cname) {
 		struct clk *c = devm_clk_get(&pdev->dev, cname);

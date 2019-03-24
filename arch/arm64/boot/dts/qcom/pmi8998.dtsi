@@ -433,7 +433,7 @@
 			compatible = "qcom,leds-qpnp";
 			reg = <0xd000 0x100>;
 			label = "rgb";
-			status = "okay";
+			status = "disabled";
 
 			red_led: qcom,rgb_0 {
 				label = "rgb";

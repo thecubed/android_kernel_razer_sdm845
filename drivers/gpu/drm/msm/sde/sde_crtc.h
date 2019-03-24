@@ -49,47 +49,25 @@ enum sde_crtc_client_type {
 };
 
 /**
- * enum sde_crtc_smmu_state:	smmu state
- * @ATTACHED:	 all the context banks are attached.
- * @DETACHED:	 all the context banks are detached.
- * @DETACHED_SEC:	 secure context bank is detached.
- * @ATTACH_ALL_REQ:	 transient state of attaching context banks.
- * @DETACH_ALL_REQ:	 transient state of detaching context banks.
- * @DETACH_SEC_REQ:	 tranisent state of secure context bank is detached
- * @ATTACH_SEC_REQ:	 transient state of attaching secure context bank.
+ * enum sde_crtc_output_capture_point
+ * @MIXER_OUT : capture mixer output
+ * @DSPP_OUT : capture output of dspp
  */
-enum sde_crtc_smmu_state {
-	ATTACHED = 0,
-	DETACHED,
-	DETACHED_SEC,
-	ATTACH_ALL_REQ,
-	DETACH_ALL_REQ,
-	DETACH_SEC_REQ,
-	ATTACH_SEC_REQ,
+enum sde_crtc_output_capture_point {
+	CAPTURE_MIXER_OUT,
+	CAPTURE_DSPP_OUT
 };
 
 /**
- * enum sde_crtc_smmu_state_transition_type: state transition type
- * @NONE: no pending state transitions
- * @PRE_COMMIT: state transitions should be done before processing the commit
- * @POST_COMMIT: state transitions to be done after processing the commit.
+ * enum sde_crtc_idle_pc_state: states of idle power collapse
+ * @IDLE_PC_NONE: no-op
+ * @IDLE_PC_ENABLE: enable idle power-collapse
+ * @IDLE_PC_DISABLE: disable idle power-collapse
  */
-enum sde_crtc_smmu_state_transition_type {
-	NONE,
-	PRE_COMMIT,
-	POST_COMMIT
-};
-
-/**
- * struct sde_crtc_smmu_state_data: stores the smmu state and transition type
- * @state: current state of smmu context banks
- * @transition_type: transition request type
- * @transition_error: whether there is error while transitioning the state
- */
-struct sde_crtc_smmu_state_data {
-	uint32_t state;
-	uint32_t transition_type;
-	uint32_t transition_error;
+enum sde_crtc_idle_pc_state {
+	IDLE_PC_NONE,
+	IDLE_PC_ENABLE,
+	IDLE_PC_DISABLE,
 };
 
 /**
@@ -170,6 +148,12 @@ struct sde_crtc_event {
 	void *usr;
 };
 
+struct sde_crtc_fps_info {
+	u32 frame_count;
+	ktime_t last_sampled_time_us;
+	u32 measured_fps;
+};
+
 /*
  * Maximum number of free event structures to cache
  */
@@ -226,6 +210,8 @@ struct sde_crtc_event {
  * @misr_enable   : boolean entry indicates misr enable/disable status.
  * @misr_frame_count  : misr frame count provided by client
  * @misr_data     : store misr data before turning off the clocks.
+ * @enable_sui_enhancement: indicate enable/disable of sui_enhancement feature
+ *                           which is set by user-mode.
  * @sbuf_op_mode_old : inline rotator op mode for previous commit cycle
  * @sbuf_flush_mask_old: inline rotator flush mask for previous commit
  * @sbuf_flush_mask_all: inline rotator flush mask for all attached planes
@@ -263,6 +249,7 @@ struct sde_crtc {
 	u64 play_count;
 	ktime_t vblank_cb_time;
 	ktime_t vblank_last_cb_time;
+	struct sde_crtc_fps_info fps_info;
 	struct device *sysfs_dev;
 	struct kernfs_node *vsync_event_sf;
 	bool vblank_requested;
@@ -295,6 +282,8 @@ struct sde_crtc {
 	u32 misr_frame_count;
 	u32 misr_data[CRTC_DUAL_MIXERS];
 
+	bool enable_sui_enhancement;
+
 	u32 sbuf_op_mode_old;
 	u32 sbuf_flush_mask_old;
 	u32 sbuf_flush_mask_all;
@@ -308,8 +297,6 @@ struct sde_crtc {
 
 	struct mutex rp_lock;
 	struct list_head rp_head;
-
-	struct sde_crtc_smmu_state_data smmu_state;
 
 	/* blob for histogram data */
 	struct drm_property_blob *hist_blob;
@@ -443,8 +430,9 @@ struct sde_crtc_state {
 };
 
 enum sde_crtc_irq_state {
-	IRQ_NOINIT,
+	IRQ_ENABLING,
 	IRQ_ENABLED,
+	IRQ_DISABLING,
 	IRQ_DISABLED,
 };
 
@@ -454,7 +442,8 @@ enum sde_crtc_irq_state {
  * @event: event type of the interrupt
  * @func: function pointer to enable/disable the interrupt
  * @list: list of user customized event in crtc
- * @ref_count: reference count for the interrupt
+ * @state: state of the interrupt
+ * @state_lock: spin lock for interrupt state
  */
 struct sde_crtc_irq_info {
 	struct sde_irq_callback irq;
@@ -463,6 +452,7 @@ struct sde_crtc_irq_info {
 			struct sde_irq_callback *irq);
 	struct list_head list;
 	enum sde_crtc_irq_state state;
+	spinlock_t state_lock;
 };
 
 #define to_sde_crtc_state(x) \
@@ -743,6 +733,22 @@ static inline int sde_crtc_get_secure_level(struct drm_crtc *crtc,
 }
 
 /**
+ * sde_crtc_is_sui_enhancement_enabled - Checks if user-mode has enabled the
+ *                                        sui enhancement feature
+ * @crtc: Pointer to crtc
+ */
+static inline bool sde_crtc_is_sui_enhancement_enabled(struct drm_crtc *crtc)
+{
+	struct sde_crtc *sde_crtc;
+
+	if (!crtc)
+		return false;
+	sde_crtc = to_sde_crtc(crtc);
+
+	return sde_crtc->enable_sui_enhancement;
+}
+
+/**
  * sde_crtc_get_secure_transition - determines the operations to be
  * performed before transitioning to secure state
  * This function should be called after swapping the new state
@@ -793,5 +799,13 @@ void sde_crtc_update_cont_splash_mixer_settings(
  * Returns: Filtered sbuf clock setting from user space
  */
 uint64_t sde_crtc_get_sbuf_clk(struct drm_crtc_state *state);
+
+/**
+ * sde_crtc_misr_setup - to configure and enable/disable MISR
+ * @crtc: Pointer to drm crtc structure
+ * @enable: boolean to indicate enable/disable misr
+ * @frame_count: frame_count to be configured
+ */
+void sde_crtc_misr_setup(struct drm_crtc *crtc, bool enable, u32 frame_count);
 
 #endif /* _SDE_CRTC_H_ */

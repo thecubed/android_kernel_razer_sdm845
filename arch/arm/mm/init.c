@@ -678,8 +678,8 @@ static struct section_perm ro_perms[] = {
 		.start  = (unsigned long)_stext,
 		.end    = (unsigned long)__init_begin,
 #ifdef CONFIG_ARM_LPAE
-		.mask   = ~L_PMD_SECT_RDONLY,
-		.prot   = L_PMD_SECT_RDONLY,
+		.mask   = ~(L_PMD_SECT_RDONLY | PMD_SECT_AP2),
+		.prot   = L_PMD_SECT_RDONLY | PMD_SECT_AP2,
 #else
 		.mask   = ~(PMD_SECT_APX | PMD_SECT_AP_WRITE),
 		.prot   = PMD_SECT_APX | PMD_SECT_AP_WRITE,
@@ -716,11 +716,14 @@ static inline void pte_update(unsigned long addr, pteval_t mask,
 				  pteval_t prot, struct mm_struct *mm)
 {
 	struct pte_data data;
+	struct mm_struct *apply_mm = mm;
 
 	data.mask = mask;
 	data.val = prot;
 
-	apply_to_page_range(mm, addr, SECTION_SIZE, __pte_update, &data);
+	if (addr >= PAGE_OFFSET)
+		apply_mm = &init_mm;
+	apply_to_page_range(apply_mm, addr, SECTION_SIZE, __pte_update, &data);
 	flush_tlb_kernel_range(addr, addr + SECTION_SIZE);
 }
 

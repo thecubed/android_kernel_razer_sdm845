@@ -24,8 +24,7 @@
 
 #define GAMUT_LUT_MEM_SIZE ((sizeof(struct drm_msm_3d_gamut)) + \
 		REG_DMA_HEADERS_BUFFER_SZ)
-#define GAMUT_SCALE_OFF_LEN (GAMUT_3D_SCALE_OFF_SZ * \
-		GAMUT_3D_SCALE_OFF_TBL_NUM * sizeof(u32))
+#define GAMUT_SCALE_OFF_LEN (GAMUT_3D_SCALE_OFF_SZ * sizeof(u32))
 #define GAMUT_SCALE_OFF_LEN_12 (GAMUT_3D_SCALEB_OFF_SZ * sizeof(u32))
 
 #define GC_LUT_MEM_SIZE ((sizeof(struct drm_msm_pgc_lut)) + \
@@ -288,7 +287,7 @@ int reg_dmav1_init_dspp_op_v4(int feature, enum sde_dspp idx)
 	}
 
 	if (feature_map[feature] >= REG_DMA_FEATURES_MAX) {
-		DRM_ERROR("invalid feature map %d for feature %d\n",
+		DRM_WARN("invalid feature map %d for feature %d\n",
 			feature_map[feature], feature);
 		return -ENOTSUPP;
 	}

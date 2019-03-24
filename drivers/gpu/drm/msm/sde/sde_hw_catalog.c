@@ -249,6 +249,7 @@ enum {
 	DITHER_OFF,
 	DITHER_LEN,
 	DITHER_VER,
+	TE_SOURCE,
 	PP_PROP_MAX,
 };
 
@@ -589,6 +590,7 @@ static struct sde_prop_type pp_prop[] = {
 	{DITHER_OFF, "qcom,sde-dither-off", false, PROP_TYPE_U32_ARRAY},
 	{DITHER_LEN, "qcom,sde-dither-size", false, PROP_TYPE_U32},
 	{DITHER_VER, "qcom,sde-dither-version", false, PROP_TYPE_U32},
+	{TE_SOURCE, "qcom,sde-te-source", false, PROP_TYPE_U32_ARRAY},
 };
 
 static struct sde_prop_type dsc_prop[] = {
@@ -1692,6 +1694,11 @@ static int sde_wb_parse_dt(struct device_node *np, struct sde_mdss_cfg *sde_cfg)
 		if (sde_cfg->has_wb_ubwc)
 			set_bit(SDE_WB_UBWC, &wb->features);
 
+		set_bit(SDE_WB_XY_ROI_OFFSET, &wb->features);
+
+		if (sde_cfg->has_cwb_support)
+			set_bit(SDE_WB_HAS_CWB, &wb->features);
+
 		for (j = 0; j < sde_cfg->mdp_count; j++) {
 			sde_cfg->mdp[j].clk_ctrls[wb->clk_ctrl].reg_off =
 				PROP_BITVALUE_ACCESS(prop_value,
@@ -2623,6 +2630,10 @@ static int sde_pp_parse_dt(struct device_node *np, struct sde_mdss_cfg *sde_cfg)
 		snprintf(pp->name, SDE_HW_BLK_NAME_LEN, "pingpong_%u",
 				pp->id - PINGPONG_0);
 		pp->len = PROP_VALUE_ACCESS(prop_value, PP_LEN, 0);
+		pp->te_source = PROP_VALUE_ACCESS(prop_value, TE_SOURCE, i);
+		if (!prop_exists[TE_SOURCE] ||
+			pp->te_source > SDE_VSYNC_SOURCE_WD_TIMER_0)
+			pp->te_source = SDE_VSYNC0_SOURCE_GPIO;
 
 		sblk->te.base = PROP_VALUE_ACCESS(prop_value, TE_OFF, i);
 		sblk->te.id = SDE_PINGPONG_TE;
@@ -3243,13 +3254,22 @@ static int _sde_hardware_pre_caps(struct sde_mdss_cfg *sde_cfg, uint32_t hw_rev)
 		sde_cfg->perf.min_prefill_lines = 25;
 		sde_cfg->vbif_qos_nlvl = 4;
 		sde_cfg->ts_prefill_rev = 1;
-	} else if (IS_SDM845_TARGET(hw_rev) || IS_SDM670_TARGET(hw_rev)) {
+	} else if (IS_SDM845_TARGET(hw_rev)) {
 		/* update sdm845 target here */
+		sde_cfg->has_wb_ubwc = true;
+		sde_cfg->has_cwb_support = true;
+		sde_cfg->perf.min_prefill_lines = 24;
+		sde_cfg->vbif_qos_nlvl = 8;
+		sde_cfg->ts_prefill_rev = 2;
+		sde_cfg->sui_misr_supported = true;
+		sde_cfg->sui_block_xin_mask = 0x3F71;
+		sde_cfg->has_qsync = true;
+	} else if (IS_SDM670_TARGET(hw_rev)) {
+		/* update sdm670 target here */
 		sde_cfg->has_wb_ubwc = true;
 		sde_cfg->perf.min_prefill_lines = 24;
 		sde_cfg->vbif_qos_nlvl = 8;
 		sde_cfg->ts_prefill_rev = 2;
-		sde_cfg->has_qsync = true;
 	} else {
 		SDE_ERROR("unsupported chipset id:%X\n", hw_rev);
 		sde_cfg->perf.min_prefill_lines = 0xffff;
@@ -3275,6 +3295,16 @@ static int _sde_hardware_post_caps(struct sde_mdss_cfg *sde_cfg,
 			max_vert_deci = max(max_vert_deci,
 				sde_cfg->sspp[i].sblk->maxvdeciexp);
 		}
+
+		/*
+		 * set sec-ui blocked SSPP feature flag based on blocked
+		 * xin-mask if sec-ui-misr feature is enabled;
+		 */
+		if (sde_cfg->sui_misr_supported
+				&& (sde_cfg->sui_block_xin_mask
+					& BIT(sde_cfg->sspp[i].xin_id)))
+			set_bit(SDE_SSPP_BLOCK_SEC_UI,
+					&sde_cfg->sspp[i].features);
 	}
 
 	/* this should be updated based on HW rev in future */

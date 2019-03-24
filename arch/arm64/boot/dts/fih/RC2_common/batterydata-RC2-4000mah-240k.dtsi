@@ -18,7 +18,7 @@ qcom,3413486_fih_cheryl2_3900mah_averaged_masterslave_may15th2018 {
 				 210	459	3900000
 				 460	549	1900000>;
 	qcom,jeita-fv-ranges = <0	459	4400000
-				460	550	4100000>;
+				460	550	4200000>;
 	fih,jeita-hysteresis = <9>;
 	qcom,checksum = <0x5E8E>;
 	qcom,gui-version = "PMI8998GUI - 2.0.0.58";

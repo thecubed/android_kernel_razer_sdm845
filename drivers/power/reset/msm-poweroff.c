@@ -44,8 +44,6 @@
 #define EMERGENCY_DLOAD_MAGIC3    0x77777777
 #define EMMC_DLOAD_TYPE		0x2
 
-#define REDUCED_SDI_MAGIC	0x4E4F5344
-
 #define SCM_IO_DISABLE_PMIC_ARBITER	1
 #define SCM_IO_DEASSERT_PS_HOLD		2
 #define SCM_WDOG_DEBUG_BOOT_PART	0x9
@@ -56,19 +54,28 @@
 #define SCM_DLOAD_BOTHDUMPS	(SCM_DLOAD_MINIDUMP | SCM_DLOAD_FULLDUMP)
 
 static int restart_mode;
-static void __iomem *restart_reason, *dload_type_addr;
+static void *restart_reason;
 static bool scm_pmic_arbiter_disable_supported;
 static bool scm_deassert_ps_hold_supported;
 /* Download mode master kill-switch */
 static void __iomem *msm_ps_hold;
 static phys_addr_t tcsr_boot_misc_detect;
+static void scm_disable_sdi(void);
+
+#ifdef CONFIG_QCOM_DLOAD_MODE
+/* Runtime could be only changed value once.
+ * There is no API from TZ to re-enable the registers.
+ * So the SDI cannot be re-enabled when it already by-passed.
+ */
 #ifdef CONFIG_FIH_APR
 static int download_mode = 0;
 #else
 static int download_mode = 1;
 #endif
-static struct kobject dload_kobj;
-static void __iomem *reduced_sdi_mode_addr;
+#else
+static const int download_mode;
+#endif
+
 
 #ifdef CONFIG_QCOM_DLOAD_MODE
 #define EDL_MODE_PROP "qcom,msm-imem-emergency_download_mode"
@@ -76,7 +83,6 @@ static void __iomem *reduced_sdi_mode_addr;
 #ifdef CONFIG_RANDOMIZE_BASE
 #define KASLR_OFFSET_PROP "qcom,msm-imem-kaslr_offset"
 #endif
-#define REDUCED_SDI_MODE_PROP "qcom,msm-imem-reduced_sdi_mode"
 
 static int in_panic;
 static int dload_type = SCM_DLOAD_FULLDUMP;
@@ -91,8 +97,10 @@ static void *emergency_dload_mode_addr;
 static void *kaslr_imem_addr;
 #endif
 static bool scm_dload_supported;
+static struct kobject dload_kobj;
+static void *dload_type_addr;
 
-static int dload_set(const char *val, struct kernel_param *kp);
+static int dload_set(const char *val, const struct kernel_param *kp);
 /* interface for exporting attributes */
 struct reset_attribute {
 	struct attribute        attr;
@@ -206,7 +214,7 @@ static void enable_emergency_dload_mode(void)
 		pr_err("Failed to set secure EDLOAD mode: %d\n", ret);
 }
 
-static int dload_set(const char *val, struct kernel_param *kp)
+static int dload_set(const char *val, const struct kernel_param *kp)
 {
 	int ret;
 
@@ -228,7 +236,10 @@ static int dload_set(const char *val, struct kernel_param *kp)
 	return 0;
 }
 #else
-#define set_dload_mode(x) do {} while (0)
+static void set_dload_mode(int on)
+{
+	return;
+}
 
 static void enable_emergency_dload_mode(void)
 {
@@ -473,13 +484,6 @@ static void deassert_ps_hold(void)
 
 static void do_msm_restart(enum reboot_mode reboot_mode, const char *cmd)
 {
-	int ret;
-	struct scm_desc desc = {
-		.args[0] = 1,
-		.args[1] = 0,
-		.arginfo = SCM_ARGS(2),
-	};
-
 	pr_notice("Going down for restart now\n");
 
 	msm_restart_prepare(cmd);
@@ -494,16 +498,7 @@ static void do_msm_restart(enum reboot_mode reboot_mode, const char *cmd)
 		msm_trigger_wdog_bite();
 #endif
 
-	/* Needed to bypass debug image on some chips */
-	if (!is_scm_armv8())
-		ret = scm_call_atomic2(SCM_SVC_BOOT,
-			       SCM_WDOG_DEBUG_BOOT_PART, 1, 0);
-	else
-		ret = scm_call2_atomic(SCM_SIP_FNID(SCM_SVC_BOOT,
-			  SCM_WDOG_DEBUG_BOOT_PART), &desc);
-	if (ret)
-		pr_err("Failed to disable secure wdog debug: %d\n", ret);
-
+	scm_disable_sdi();
 	halt_spmi_pmic_arbiter();
 	deassert_ps_hold();
 
@@ -512,27 +507,11 @@ static void do_msm_restart(enum reboot_mode reboot_mode, const char *cmd)
 
 static void do_msm_poweroff(void)
 {
-	int ret;
-	struct scm_desc desc = {
-		.args[0] = 1,
-		.args[1] = 0,
-		.arginfo = SCM_ARGS(2),
-	};
-
 	pr_notice("Powering off the SoC\n");
-#ifdef CONFIG_QCOM_DLOAD_MODE
+
 	set_dload_mode(0);
-#endif
+	scm_disable_sdi();
 	qpnp_pon_system_pwr_off(PON_POWER_OFF_SHUTDOWN);
-	/* Needed to bypass debug image on some chips */
-	if (!is_scm_armv8())
-		ret = scm_call_atomic2(SCM_SVC_BOOT,
-			       SCM_WDOG_DEBUG_BOOT_PART, 1, 0);
-	else
-		ret = scm_call2_atomic(SCM_SIP_FNID(SCM_SVC_BOOT,
-			  SCM_WDOG_DEBUG_BOOT_PART), &desc);
-	if (ret)
-		pr_err("Failed to disable wdog debug: %d\n", ret);
 
 	halt_spmi_pmic_arbiter();
 	deassert_ps_hold();
@@ -541,6 +520,7 @@ static void do_msm_poweroff(void)
 	pr_err("Powering off has failed\n");
 }
 
+#ifdef CONFIG_QCOM_DLOAD_MODE
 static ssize_t attr_show(struct kobject *kobj, struct attribute *attr,
 				char *buf)
 {
@@ -615,49 +595,6 @@ static size_t store_emmc_dload(struct kobject *kobj, struct attribute *attr,
 	return count;
 }
 
-static ssize_t show_reduced_sdi_mode(struct kobject *kobj,
-				     struct attribute *attr,
-				     char *buf)
-{
-	uint32_t read_val, show_val;
-
-	if (!reduced_sdi_mode_addr)
-		return -ENODEV;
-
-	read_val = __raw_readl(reduced_sdi_mode_addr);
-	if (read_val == REDUCED_SDI_MAGIC)
-		show_val = 1;
-	else
-		show_val = 0;
-
-	return snprintf(buf, sizeof(show_val), "%u\n", show_val);
-}
-
-static size_t store_reduced_sdi_mode(struct kobject *kobj,
-				     struct attribute *attr,
-				     const char *buf, size_t count)
-{
-	uint32_t enabled;
-	int ret;
-
-	if (!reduced_sdi_mode_addr)
-		return -ENODEV;
-
-	ret = kstrtouint(buf, 0, &enabled);
-	if (ret < 0)
-		return ret;
-
-	if (!(enabled == 0 || enabled == 1))
-		return -EINVAL;
-
-	if (enabled == 1)
-		__raw_writel(REDUCED_SDI_MAGIC, reduced_sdi_mode_addr);
-	else
-		 __raw_writel(0, reduced_sdi_mode_addr);
-
-	return count;
-}
-
 #ifdef CONFIG_QCOM_MINIDUMP
 static DEFINE_MUTEX(tcsr_lock);
 
@@ -702,21 +639,19 @@ static size_t store_dload_mode(struct kobject *kobj, struct attribute *attr,
 RESET_ATTR(dload_mode, 0644, show_dload_mode, store_dload_mode);
 #endif
 RESET_ATTR(emmc_dload, 0644, show_emmc_dload, store_emmc_dload);
-RESET_ATTR(reduced_sdi_mode, 0644, show_reduced_sdi_mode,
-	   store_reduced_sdi_mode);
 
 static struct attribute *reset_attrs[] = {
 	&reset_attr_emmc_dload.attr,
 #ifdef CONFIG_QCOM_MINIDUMP
 	&reset_attr_dload_mode.attr,
 #endif
-	&reset_attr_reduced_sdi_mode.attr,
 	NULL
 };
 
 static struct attribute_group reset_attr_group = {
 	.attrs = reset_attrs,
 };
+#endif
 
 static int msm_restart_probe(struct platform_device *pdev)
 {
@@ -773,22 +708,13 @@ static int msm_restart_probe(struct platform_device *pdev)
 				"qcom,msm-imem-dload-type");
 	if (!np) {
 		pr_err("unable to find DT imem dload-type node\n");
+		goto skip_sysfs_create;
 	} else {
 		dload_type_addr = of_iomap(np, 0);
 		if (!dload_type_addr) {
 			pr_err("unable to map imem dload-type offset\n");
+			goto skip_sysfs_create;
 		}
-	}
-
-	np = of_find_compatible_node(NULL, NULL, REDUCED_SDI_MODE_PROP);
-	if (!np) {
-		pr_err("unable to find DT imem reduced SDI mode node\n");
-	} else {
-		reduced_sdi_mode_addr = of_iomap(np, 0);
-		if (!reduced_sdi_mode_addr)
-			pr_err("unable to map imem reduced SDI mode offset\n");
-		else
-			__raw_writel(0, reduced_sdi_mode_addr);
 	}
 
 	ret = kobject_init_and_add(&dload_kobj, &reset_ktype,
@@ -839,10 +765,8 @@ skip_sysfs_create:
 		scm_deassert_ps_hold_supported = true;
 
 	set_dload_mode(download_mode);
-	/* FIH: avoid enter ramdump mode after trigger hw_rst on purpose { */
 	if (!download_mode)
 		scm_disable_sdi();
-	/* FIH: avoid enter ramdump mode after trigger hw_rst on purpose } */
 
 	return 0;
 

@@ -1874,7 +1874,12 @@ static irqreturn_t synaptics_rmi4_irq(int irq, void *data)
     if (gpio_get_value(bdata->irq_gpio) != bdata->irq_on_state)
         goto exit;
 
+    /* prevent CPU from entering deep sleep */
+    pm_qos_update_request(&rmi4_data->pm_qos_req, 100);
+
     synaptics_rmi4_sensor_report(rmi4_data, true);
+
+    pm_qos_update_request(&rmi4_data->pm_qos_req, PM_QOS_DEFAULT_VALUE);
 
 exit:
     return IRQ_HANDLED;
@@ -4655,6 +4660,9 @@ static int synaptics_rmi4_probe(struct platform_device *pdev)
 
     vir_button_map = bdata->vir_button_map;
 
+    pm_qos_add_request(&rmi4_data->pm_qos_req, PM_QOS_CPU_DMA_LATENCY,
+                        PM_QOS_DEFAULT_VALUE);
+
     retval = synaptics_rmi4_get_reg(rmi4_data, true);
     if (retval < 0)
     {
@@ -4876,6 +4884,7 @@ err_enable_reg:
     synaptics_rmi4_get_reg(rmi4_data, false);
 
 err_get_reg:
+    pm_qos_remove_request(&rmi4_data->pm_qos_req);
     kfree(rmi4_data);
 
     return retval;
@@ -4931,6 +4940,8 @@ static int synaptics_rmi4_remove(struct platform_device *pdev)
 #ifdef USE_EARLYSUSPEND
     unregister_early_suspend(&rmi4_data->early_suspend);
 #endif
+
+    pm_qos_remove_request(&rmi4_data->pm_qos_req);
 
     synaptics_rmi4_empty_fn_list(rmi4_data);
     input_unregister_device(rmi4_data->input_dev);

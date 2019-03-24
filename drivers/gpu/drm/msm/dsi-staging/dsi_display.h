@@ -1,6 +1,6 @@
 /*
+ * Copyright (c) 2015-2018, The Linux Foundation.All rights reserved.
  * Copyright (c) 2018, Razer Inc. All rights reserved.
- * Copyright (c) 2015-2017, The Linux Foundation.All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -243,6 +243,18 @@ struct dsi_display {
 	struct work_struct lp_rx_timeout_work;
 };
 
+/**
+ * dsi_display_has_ext_bridge() - check whether display has ext bridge
+ *                                connected.
+ *
+ * Return: True - ext bridge, False - no ext bridge.
+ */
+static inline bool dsi_display_has_ext_bridge(const struct dsi_display *display)
+{
+	return display->type == DSI_DISPLAY_EXT_BRIDGE ||
+		display->type == DSI_DISPLAY_SPLIT_EXT_BRIDGE;
+}
+
 int dsi_display_dev_probe(struct platform_device *pdev);
 int dsi_display_dev_remove(struct platform_device *pdev);
 
@@ -306,6 +318,19 @@ int dsi_display_drm_bridge_init(struct dsi_display *display,
 int dsi_display_drm_bridge_deinit(struct dsi_display *display);
 
 /**
+ * dsi_display_drm_ext_bridge_init() - initializes DRM bridge for ext bridge
+ * @display:            Handle to the display.
+ * @enc:                Pointer to the encoder object which is connected to the
+ *			display.
+ * @connector:          Pointer to the connector object which is connected to
+ *                      the display.
+ *
+ * Return: error code.
+ */
+int dsi_display_drm_ext_bridge_init(struct dsi_display *display,
+		struct drm_encoder *enc, struct drm_connector *connector);
+
+/**
  * dsi_display_get_info() - returns the display properties
  * @info:             Pointer to the structure where info is stored.
  * @disp:             Handle to the display.
@@ -313,6 +338,15 @@ int dsi_display_drm_bridge_deinit(struct dsi_display *display);
  * Return: error code.
  */
 int dsi_display_get_info(struct msm_display_info *info, void *disp);
+
+/**
+ * dsi_display_ext_bridge_get_info() - returns the ext bridge's display info
+ * @info:             Pointer to the structure where info is stored.
+ * @disp:             Handle to the display.
+ *
+ * Return: error code.
+ */
+int dsi_display_ext_bridge_get_info(struct msm_display_info *info, void *disp);
 
 /**
  * dsi_display_get_mode_count() - get number of modes supported by the display
@@ -558,8 +592,9 @@ int dsi_display_set_backlight(void *display, u32 bl_lvl);
 /**
  * dsi_display_check_status() - check if panel is dead or alive
  * @display:            Handle to display.
+ * @te_check_override:	Whether check for TE from panel or default check
  */
-int dsi_display_check_status(void *display);
+int dsi_display_check_status(void *display, bool te_check_override);
 
 /**
  * dsi_display_cmd_transfer() - transfer command to the panel

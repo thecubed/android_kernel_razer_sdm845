@@ -282,7 +282,8 @@ static int sde_cp_handle_range_property(struct sde_cp_node *prop_node,
 		return 0;
 	}
 
-	ret = copy_from_user(blob_ptr->data, (void *)val, blob_ptr->length);
+	ret = copy_from_user(blob_ptr->data, u64_to_user_ptr(val),
+			blob_ptr->length);
 	if (ret) {
 		DRM_ERROR("failed to get the property info ret %d", ret);
 		ret = -EFAULT;
@@ -639,6 +640,7 @@ static void _sde_cp_crtc_enable_hist_irq(struct sde_crtc *sde_crtc)
 	if (!node)
 		return;
 
+	spin_lock_irqsave(&node->state_lock, flags);
 	if (node->state == IRQ_DISABLED) {
 		ret = sde_core_irq_enable(kms, &irq_idx, 1);
 		if (ret)
@@ -646,6 +648,7 @@ static void _sde_cp_crtc_enable_hist_irq(struct sde_crtc *sde_crtc)
 		else
 			node->state = IRQ_ENABLED;
 	}
+	spin_unlock_irqrestore(&node->state_lock, flags);
 }
 
 static void sde_cp_crtc_setfeature(struct sde_cp_node *prop_node,
@@ -1133,7 +1136,8 @@ int sde_cp_crtc_set_property(struct drm_crtc *crtc,
 	if (!sde_crtc->num_mixers ||
 	    sde_crtc->num_mixers > ARRAY_SIZE(sde_crtc->mixers)) {
 		DRM_INFO("Invalid mixer config act cnt %d max cnt %ld\n",
-			sde_crtc->num_mixers, ARRAY_SIZE(sde_crtc->mixers));
+			sde_crtc->num_mixers,
+				(long int)ARRAY_SIZE(sde_crtc->mixers));
 		ret = -EPERM;
 		goto exit;
 	}
@@ -1291,6 +1295,33 @@ void sde_cp_crtc_suspend(struct drm_crtc *crtc)
 void sde_cp_crtc_resume(struct drm_crtc *crtc)
 {
 	/* placeholder for operations needed during resume */
+}
+
+void sde_cp_crtc_clear(struct drm_crtc *crtc)
+{
+	struct sde_crtc *sde_crtc = NULL;
+	unsigned long flags;
+
+	if (!crtc) {
+		DRM_ERROR("crtc %pK\n", crtc);
+		return;
+	}
+	sde_crtc = to_sde_crtc(crtc);
+	if (!sde_crtc) {
+		DRM_ERROR("sde_crtc %pK\n", sde_crtc);
+		return;
+	}
+
+	mutex_lock(&sde_crtc->crtc_cp_lock);
+	list_del_init(&sde_crtc->active_list);
+	list_del_init(&sde_crtc->dirty_list);
+	list_del_init(&sde_crtc->ad_active);
+	list_del_init(&sde_crtc->ad_dirty);
+	mutex_unlock(&sde_crtc->crtc_cp_lock);
+
+	spin_lock_irqsave(&sde_crtc->spin_lock, flags);
+	list_del_init(&sde_crtc->user_event_list);
+	spin_unlock_irqrestore(&sde_crtc->spin_lock, flags);
 }
 
 static void dspp_pcc_install_property(struct drm_crtc *crtc)
@@ -1724,6 +1755,9 @@ static void sde_cp_notify_ad_event(struct drm_crtc *crtc_drm, void *arg)
 	struct sde_crtc *crtc;
 	struct drm_event event;
 	int i;
+	struct msm_drm_private *priv;
+	struct sde_kms *kms;
+	int ret;
 
 	crtc = to_sde_crtc(crtc_drm);
 	num_mixers = crtc->num_mixers;
@@ -1740,9 +1774,25 @@ static void sde_cp_notify_ad_event(struct drm_crtc *crtc_drm, void *arg)
 	if (!hw_dspp)
 		return;
 
+	kms = get_kms(crtc_drm);
+	if (!kms || !kms->dev) {
+		SDE_ERROR("invalid arg(s)\n");
+		return;
+	}
+
+	priv = kms->dev->dev_private;
+	ret = sde_power_resource_enable(&priv->phandle, kms->core_client, true);
+	if (ret) {
+		SDE_ERROR("failed to enable power resource %d\n", ret);
+		SDE_EVT32(ret, SDE_EVTLOG_ERROR);
+		return;
+	}
+
 	hw_dspp->ops.ad_read_intr_resp(hw_dspp, AD4_IN_OUT_BACKLIGHT,
 			&input_bl, &output_bl);
 
+	sde_power_resource_enable(&priv->phandle, kms->core_client,
+					false);
 	if (!input_bl || input_bl < output_bl)
 		return;
 
@@ -1763,6 +1813,7 @@ int sde_cp_ad_interrupt(struct drm_crtc *crtc_drm, bool en,
 	struct sde_crtc *crtc;
 	int i;
 	int irq_idx, ret;
+	unsigned long flags;
 	struct sde_cp_node prop_node;
 	struct sde_crtc_irq_info *node = NULL;
 
@@ -1809,28 +1860,31 @@ int sde_cp_ad_interrupt(struct drm_crtc *crtc_drm, bool en,
 		goto exit;
 	}
 
-	node = _sde_cp_get_intr_node(DRM_EVENT_AD_BACKLIGHT, crtc);
+	node = container_of(ad_irq, struct sde_crtc_irq_info, irq);
 
+	/* deregister AD irq */
 	if (!en) {
-		if (node) {
-			if (node->state == IRQ_ENABLED) {
-				ret = sde_core_irq_disable(kms, &irq_idx, 1);
-				if (ret)
-					DRM_ERROR("disable irq %d error %d\n",
-						irq_idx, ret);
-				else
-					node->state = IRQ_NOINIT;
+		spin_lock_irqsave(&node->state_lock, flags);
+		if (node->state == IRQ_ENABLED) {
+			node->state = IRQ_DISABLING;
+			spin_unlock_irqrestore(&node->state_lock, flags);
+			ret = sde_core_irq_disable(kms, &irq_idx, 1);
+			spin_lock_irqsave(&node->state_lock, flags);
+			if (ret) {
+				DRM_ERROR("disable irq %d error %d\n",
+					irq_idx, ret);
+				node->state = IRQ_ENABLED;
 			} else {
-				node->state = IRQ_NOINIT;
+				node->state = IRQ_DISABLED;
 			}
-		} else {
-			DRM_ERROR("failed to get node from crtc event list\n");
 		}
+		spin_unlock_irqrestore(&node->state_lock, flags);
+
 		sde_core_irq_unregister_callback(kms, irq_idx, ad_irq);
-		ret = 0;
 		goto exit;
 	}
 
+	/* register AD irq */
 	ad_irq->arg = crtc;
 	ad_irq->func = sde_cp_ad_interrupt_cb;
 	ret = sde_core_irq_register_callback(kms, irq_idx, ad_irq);
@@ -1839,30 +1893,22 @@ int sde_cp_ad_interrupt(struct drm_crtc *crtc_drm, bool en,
 		goto exit;
 	}
 
-	if (node) {
-		/* device resume or resume from IPC cases */
-		if (node->state == IRQ_DISABLED || node->state == IRQ_NOINIT) {
-			ret = sde_core_irq_enable(kms, &irq_idx, 1);
-			if (ret) {
-				DRM_ERROR("enable irq %d error %d\n",
-					irq_idx, ret);
-				sde_core_irq_unregister_callback(kms,
-					irq_idx, ad_irq);
-			} else {
-				node->state = IRQ_ENABLED;
-			}
-		}
-	} else {
-		/* request from userspace to register the event
-		 * in this case, node has not been added into the event list
-		 */
+	spin_lock_irqsave(&node->state_lock, flags);
+	if (node->state == IRQ_DISABLED) {
+		node->state = IRQ_ENABLING;
+		spin_unlock_irqrestore(&node->state_lock, flags);
 		ret = sde_core_irq_enable(kms, &irq_idx, 1);
+		spin_lock_irqsave(&node->state_lock, flags);
 		if (ret) {
-			DRM_ERROR("failed to enable irq ret %d\n", ret);
-			sde_core_irq_unregister_callback(kms,
-				irq_idx, ad_irq);
+			DRM_ERROR("enable irq %d error %d\n", irq_idx, ret);
+			sde_core_irq_unregister_callback(kms, irq_idx, ad_irq);
+			node->state = IRQ_DISABLED;
+		} else {
+			node->state = IRQ_ENABLED;
 		}
 	}
+	spin_unlock_irqrestore(&node->state_lock, flags);
+
 exit:
 	return ret;
 }
@@ -1948,18 +1994,21 @@ static void sde_cp_hist_interrupt_cb(void *arg, int irq_idx)
 	spin_unlock_irqrestore(&crtc->spin_lock, flags);
 
 	if (!node) {
-		DRM_ERROR("cannot find histogram event node in crtc\n");
+		DRM_DEBUG_DRIVER("cannot find histogram event node in crtc\n");
 		return;
 	}
 
+	spin_lock_irqsave(&node->state_lock, flags);
 	if (node->state == IRQ_ENABLED) {
 		if (sde_core_irq_disable_nolock(kms, irq_idx)) {
 			DRM_ERROR("failed to disable irq %d, ret %d\n",
 				irq_idx, ret);
+			spin_unlock_irqrestore(&node->state_lock, flags);
 			return;
 		}
 		node->state = IRQ_DISABLED;
 	}
+	spin_unlock_irqrestore(&node->state_lock, flags);
 
 	/* lock histogram buffer */
 	for (i = 0; i < crtc->num_mixers; i++) {
@@ -1979,8 +2028,10 @@ static void sde_cp_notify_hist_event(struct drm_crtc *crtc_drm, void *arg)
 	struct sde_crtc *crtc;
 	struct drm_event event;
 	struct drm_msm_hist *hist_data;
-	struct drm_msm_hist tmp_hist_data;
-	u32 i, j;
+	struct msm_drm_private *priv;
+	struct sde_kms *kms;
+	int ret;
+	u32 i;
 
 	if (!crtc_drm) {
 		DRM_ERROR("invalid crtc %pK\n", crtc_drm);
@@ -1996,25 +2047,37 @@ static void sde_cp_notify_hist_event(struct drm_crtc *crtc_drm, void *arg)
 	if (!crtc->hist_blob)
 		return;
 
+	kms = get_kms(crtc_drm);
+	if (!kms || !kms->dev) {
+		SDE_ERROR("invalid arg(s)\n");
+		return;
+	}
+
+	priv = kms->dev->dev_private;
+	ret = sde_power_resource_enable(&priv->phandle, kms->core_client, true);
+	if (ret) {
+		SDE_ERROR("failed to enable power resource %d\n", ret);
+		SDE_EVT32(ret, SDE_EVTLOG_ERROR);
+		return;
+	}
+
 	/* read histogram data into blob */
 	hist_data = (struct drm_msm_hist *)crtc->hist_blob->data;
+	memset(hist_data->data, 0, sizeof(hist_data->data));
 	for (i = 0; i < crtc->num_mixers; i++) {
 		hw_dspp = crtc->mixers[i].hw_dspp;
 		if (!hw_dspp || !hw_dspp->ops.read_histogram) {
 			DRM_ERROR("invalid dspp %pK or read_histogram func\n",
 				hw_dspp);
+			sde_power_resource_enable(&priv->phandle,
+						kms->core_client, false);
 			return;
 		}
-		if (!i) {
-			hw_dspp->ops.read_histogram(hw_dspp, hist_data);
-		} else {
-			/* Merge hist data for DSPP0 and DSPP1 */
-			hw_dspp->ops.read_histogram(hw_dspp, &tmp_hist_data);
-			for (j = 0; j < HIST_V_SIZE; j++)
-				hist_data->data[j] += tmp_hist_data.data[j];
-		}
+		hw_dspp->ops.read_histogram(hw_dspp, hist_data);
 	}
 
+	sde_power_resource_enable(&priv->phandle, kms->core_client,
+					false);
 	/* send histogram event with blob id */
 	event.length = sizeof(u32);
 	event.type = DRM_EVENT_HISTOGRAM;
@@ -2032,6 +2095,7 @@ int sde_cp_hist_interrupt(struct drm_crtc *crtc_drm, bool en,
 	struct sde_crtc *crtc;
 	struct sde_crtc_irq_info *node = NULL;
 	int i, irq_idx, ret = 0;
+	unsigned long flags;
 
 	if (!crtc_drm || !hist_irq) {
 		DRM_ERROR("invalid crtc %pK irq %pK\n", crtc_drm, hist_irq);
@@ -2068,25 +2132,25 @@ int sde_cp_hist_interrupt(struct drm_crtc *crtc_drm, bool en,
 		goto exit;
 	}
 
-	node = _sde_cp_get_intr_node(DRM_EVENT_HISTOGRAM, crtc);
+	node = container_of(hist_irq, struct sde_crtc_irq_info, irq);
 
 	/* deregister histogram irq */
 	if (!en) {
-		if (node) {
-			/* device suspend case or suspend to IPC cases */
-			if (node->state == IRQ_ENABLED) {
-				ret = sde_core_irq_disable(kms, &irq_idx, 1);
-				if (ret)
-					DRM_ERROR("disable irq %d error %d\n",
-						irq_idx, ret);
-				else
-					node->state = IRQ_NOINIT;
+		spin_lock_irqsave(&node->state_lock, flags);
+		if (node->state == IRQ_ENABLED) {
+			node->state = IRQ_DISABLING;
+			spin_unlock_irqrestore(&node->state_lock, flags);
+			ret = sde_core_irq_disable(kms, &irq_idx, 1);
+			spin_lock_irqsave(&node->state_lock, flags);
+			if (ret) {
+				DRM_ERROR("disable irq %d error %d\n",
+					irq_idx, ret);
+				node->state = IRQ_ENABLED;
 			} else {
-				node->state = IRQ_NOINIT;
+				node->state = IRQ_DISABLED;
 			}
-		} else {
-			DRM_ERROR("failed to get node from crtc event list\n");
 		}
+		spin_unlock_irqrestore(&node->state_lock, flags);
 
 		sde_core_irq_unregister_callback(kms, irq_idx, hist_irq);
 		goto exit;
@@ -2101,30 +2165,23 @@ int sde_cp_hist_interrupt(struct drm_crtc *crtc_drm, bool en,
 		goto exit;
 	}
 
-	if (node) {
-		/* device resume or resume from IPC cases */
-		if (node->state == IRQ_DISABLED || node->state == IRQ_NOINIT) {
-			ret = sde_core_irq_enable(kms, &irq_idx, 1);
-			if (ret) {
-				DRM_ERROR("enable irq %d error %d\n",
-					irq_idx, ret);
-				sde_core_irq_unregister_callback(kms,
-					irq_idx, hist_irq);
-			} else {
-				node->state = IRQ_ENABLED;
-			}
-		}
-	} else {
-		/* request from userspace to register the event
-		 * in this case, node has not been added into the event list
-		 */
+	spin_lock_irqsave(&node->state_lock, flags);
+	if (node->state == IRQ_DISABLED) {
+		node->state = IRQ_ENABLING;
+		spin_unlock_irqrestore(&node->state_lock, flags);
 		ret = sde_core_irq_enable(kms, &irq_idx, 1);
+		spin_lock_irqsave(&node->state_lock, flags);
 		if (ret) {
-			DRM_ERROR("failed to enable irq ret %d\n", ret);
+			DRM_ERROR("enable irq %d error %d\n", irq_idx, ret);
 			sde_core_irq_unregister_callback(kms,
 				irq_idx, hist_irq);
+			node->state = IRQ_DISABLED;
+		} else {
+			node->state = IRQ_ENABLED;
 		}
 	}
+	spin_unlock_irqrestore(&node->state_lock, flags);
+
 exit:
 	return ret;
 }

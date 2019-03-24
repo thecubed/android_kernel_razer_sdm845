@@ -134,7 +134,9 @@
 				#size-cells = <0>;
 				qcom,psci-mode-shift = <0>;
 				qcom,psci-mode-mask = <0xf>;
-				qcom,disable-prediction;
+				qcom,ref-stddev = <100>;
+				qcom,tmr-add = <100>;
+				qcom,ref-premature-cnt = <3>;
 				qcom,cpu = <&CPU6 &CPU7>;
 
 				qcom,pm-cpu-level@0 { /* C1 */
@@ -193,5 +195,6 @@
 	qcom,rpmh-master-stats@b221200 {
 		compatible = "qcom,rpmh-master-stats-v1";
 		reg = <0xb221200 0x60>;
+		qcom,use-alt-unit = <3>;
 	};
 };

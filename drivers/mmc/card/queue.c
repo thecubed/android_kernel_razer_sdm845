@@ -98,18 +98,20 @@ static inline void mmc_cmdq_ready_wait(struct mmc_host *host,
 	 *    be any other direct command active.
 	 * 3. cmdq state should be unhalted.
 	 * 4. cmdq state shouldn't be in error state.
-	 * 5. free tag available to process the new request.
+	 * 5. There is no outstanding RPMB request pending.
+	 * 6. free tag available to process the new request.
+	 *    (This must be the last condtion to check)
 	 */
 	wait_event(ctx->wait, kthread_should_stop()
 		|| (mmc_peek_request(mq) &&
-		!(((req_op(mq->cmdq_req_peeked) == REQ_OP_FLUSH) ||
-		   (req_op(mq->cmdq_req_peeked) == REQ_OP_DISCARD))
+		!(mmc_req_is_special(mq->cmdq_req_peeked)
 		  && test_bit(CMDQ_STATE_DCMD_ACTIVE, &ctx->curr_state))
 		&& !(!host->card->part_curr && !mmc_card_suspended(host->card)
 		     && mmc_host_halt(host))
 		&& !(!host->card->part_curr && mmc_host_cq_disable(host) &&
 			!mmc_card_suspended(host->card))
 		&& !test_bit(CMDQ_STATE_ERR, &ctx->curr_state)
+		&& !atomic_read(&host->rpmb_req_pending)
 		&& !mmc_check_blk_queue_start_tag(q, mq->cmdq_req_peeked)));
 }
 
@@ -131,7 +133,14 @@ static int mmc_cmdq_thread(void *d)
 		if (kthread_should_stop())
 			break;
 
+		ret = mmc_cmdq_down_rwsem(host, mq->cmdq_req_peeked);
+		if (ret) {
+			mmc_cmdq_up_rwsem(host);
+			continue;
+		}
 		ret = mq->cmdq_issue_fn(mq, mq->cmdq_req_peeked);
+		mmc_cmdq_up_rwsem(host);
+
 		/*
 		 * Don't requeue if issue_fn fails.
 		 * Recovery will be come by completion softirq
@@ -312,6 +321,8 @@ void mmc_cmdq_setup_queue(struct mmc_queue *mq, struct mmc_card *card)
 						host->max_req_size / 512));
 	blk_queue_max_segment_size(mq->queue, host->max_seg_size);
 	blk_queue_max_segments(mq->queue, host->max_segs);
+	if (host->inlinecrypt_support)
+		queue_flag_set_unlocked(QUEUE_FLAG_INLINECRYPT, mq->queue);
 }
 
 /**
@@ -481,6 +492,9 @@ cur_sg_alloc_failed:
 success:
 	sema_init(&mq->thread_sem, 1);
 
+	if (host->inlinecrypt_support)
+		queue_flag_set_unlocked(QUEUE_FLAG_INLINECRYPT, mq->queue);
+
 	/* hook for pm qos legacy init */
 	if (card->host->ops->init)
 		card->host->ops->init(card->host);
@@ -638,6 +652,7 @@ int mmc_cmdq_init(struct mmc_queue *mq, struct mmc_card *card)
 
 	init_waitqueue_head(&card->host->cmdq_ctx.queue_empty_wq);
 	init_waitqueue_head(&card->host->cmdq_ctx.wait);
+	init_rwsem(&card->host->cmdq_ctx.err_rwsem);
 
 	mq->mqrq_cmdq = kzalloc(
 			sizeof(struct mmc_queue_req) * q_depth, GFP_KERNEL);

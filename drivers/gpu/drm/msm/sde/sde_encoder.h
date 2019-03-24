@@ -242,6 +242,7 @@ int sde_encoder_update_caps_for_cont_splash(struct drm_encoder *encoder);
  * sde_encoder_display_failure_notification - update sde encoder state for
  * esd timeout or other display failure notification. This event flows from
  * dsi, sde_connector to sde_encoder.
+ *
  *      TODO: manage the event at sde_kms level for forward processing.
  * @drm_enc:    Pointer to drm encoder structure
  * @Return:     true if successful in updating the encoder structure
@@ -255,5 +256,12 @@ int sde_encoder_display_failure_notification(struct drm_encoder *enc);
  * @Return:     true if successful in updating the encoder structure
  */
 int sde_encoder_in_clone_mode(struct drm_encoder *enc);
+
+/**
+ * sde_encoder_control_idle_pc - control enable/disable of idle power collapse
+ * @drm_enc:    Pointer to drm encoder structure
+ * @enable:	enable/disable flag
+ */
+void sde_encoder_control_idle_pc(struct drm_encoder *enc, bool enable);
 
 #endif /* __SDE_ENCODER_H__ */

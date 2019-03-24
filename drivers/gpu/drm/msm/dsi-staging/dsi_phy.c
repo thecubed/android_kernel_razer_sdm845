@@ -565,6 +565,8 @@ int dsi_phy_drv_init(struct msm_dsi_phy *dsi_phy)
 	snprintf(dbg_name, DSI_DEBUG_NAME_LEN, "dsi%d_phy", dsi_phy->index);
 	sde_dbg_reg_register_base(dbg_name, dsi_phy->hw.base,
 				msm_iomap_size(dsi_phy->pdev, "dsi_phy"));
+	sde_dbg_reg_register_dump_range(dbg_name, dbg_name, 0,
+				msm_iomap_size(dsi_phy->pdev, "dsi_phy"), 0);
 	return 0;
 }
 
@@ -695,8 +697,7 @@ static int dsi_phy_enable_ulps(struct msm_dsi_phy *phy,
 	u32 lanes = 0;
 	u32 ulps_lanes;
 
-	if (config->panel_mode == DSI_OP_CMD_MODE)
-		lanes = config->common_config.data_lanes;
+	lanes = config->common_config.data_lanes;
 	lanes |= DSI_CLOCK_LANE;
 
 	/*
@@ -731,8 +732,7 @@ static int dsi_phy_disable_ulps(struct msm_dsi_phy *phy,
 {
 	u32 ulps_lanes, lanes = 0;
 
-	if (config->panel_mode == DSI_OP_CMD_MODE)
-		lanes = config->common_config.data_lanes;
+	lanes = config->common_config.data_lanes;
 	lanes |= DSI_CLOCK_LANE;
 
 	ulps_lanes = phy->hw.ops.ulps_ops.get_lanes_in_ulps(&phy->hw);

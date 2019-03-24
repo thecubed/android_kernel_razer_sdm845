@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 an
@@ -25,8 +25,10 @@
 
 		arm,buffer-size = <0x100000>;
 		arm,sg-enable;
+		qcom,force-reg-dump;
 
 		coresight-name = "coresight-tmc-etr";
+		coresight-csr = <&csr>;
 		coresight-ctis = <&cti0 &cti8>;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
@@ -49,8 +51,10 @@
 		reg-names = "tmc-base";
 
 		coresight-name = "coresight-tmc-etf";
+		coresight-csr = <&csr>;
 
 		arm,default-sink;
+		qcom,force-reg-dump;
 		coresight-ctis = <&cti0 &cti8>;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
@@ -330,6 +334,15 @@
 						<&audio_etm0_out_funnel_mm>;
 				};
 			};
+
+			port@4 {
+				reg = <6>;
+				funnel_mm_in_gfx: endpoint {
+					slave-mode;
+					remote-endpoint =
+						<&gfx_out_funnel_mm>;
+				};
+			};
 		};
 	};
 
@@ -492,6 +505,8 @@
 
 		reg = <0x619c000 0x1000>;
 		cpu = <&CPU0>;
+
+		qcom,tupwr-disable;
 		coresight-name = "coresight-etm0";
 
 		clocks = <&clock_gcc clk_qdss_clk>,
@@ -875,6 +890,7 @@
 		reg-names = "cti-base";
 		coresight-name = "coresight-cti-cpu0";
 		cpu = <&CPU0>;
+		qcom,cit-save;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
 			 <&clock_gcc clk_qdss_a_clk>;
@@ -889,6 +905,7 @@
 		reg-names = "cti-base";
 		coresight-name = "coresight-cti-cpu1";
 		cpu = <&CPU1>;
+		qcom,cit-save;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
 			 <&clock_gcc clk_qdss_a_clk>;
@@ -903,6 +920,7 @@
 		reg-names = "cti-base";
 		coresight-name = "coresight-cti-cpu2";
 		cpu = <&CPU2>;
+		qcom,cit-save;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
 			 <&clock_gcc clk_qdss_a_clk>;
@@ -917,6 +935,7 @@
 		reg-names = "cti-base";
 		coresight-name = "coresight-cti-cpu3";
 		cpu = <&CPU3>;
+		qcom,cit-save;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
 			 <&clock_gcc clk_qdss_a_clk>;
@@ -931,6 +950,7 @@
 		reg-names = "cti-base";
 		coresight-name = "coresight-cti-cpu4";
 		cpu = <&CPU4>;
+		qcom,cit-save;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
 			 <&clock_gcc clk_qdss_a_clk>;
@@ -945,6 +965,7 @@
 		reg-names = "cti-base";
 		coresight-name = "coresight-cti-cpu5";
 		cpu = <&CPU5>;
+		qcom,cit-save;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
 			 <&clock_gcc clk_qdss_a_clk>;
@@ -959,6 +980,7 @@
 		reg-names = "cti-base";
 		coresight-name = "coresight-cti-cpu6";
 		cpu = <&CPU6>;
+		qcom,cit-save;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
 			 <&clock_gcc clk_qdss_a_clk>;
@@ -973,6 +995,7 @@
 		reg-names = "cti-base";
 		coresight-name = "coresight-cti-cpu7";
 		cpu = <&CPU7>;
+		qcom,cit-save;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
 			 <&clock_gcc clk_qdss_a_clk>;
@@ -1130,6 +1153,10 @@
 		reg-names = "csr-base";
 		coresight-name = "coresight-csr";
 
+		qcom,usb-bam-support;
+		qcom,hwctrl-set-support;
+		qcom,set-byte-cntr-support;
+
 		qcom,blk-size = <1>;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
@@ -1231,6 +1258,7 @@
 				"usbbam-mux", "blsp-mux";
 
 		coresight-name = "coresight-hwevent";
+		coresight-csr = <&csr>;
 
 		clocks = <&clock_gcc clk_qdss_clk>,
 			 <&clock_gcc clk_qdss_a_clk>;

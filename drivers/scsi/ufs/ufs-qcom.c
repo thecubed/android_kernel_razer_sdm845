@@ -727,6 +727,11 @@ static int ufs_qcom_config_vreg(struct device *dev,
 
 	reg = vreg->reg;
 	if (regulator_count_voltages(reg) > 0) {
+		uA_load = on ? vreg->max_uA : 0;
+		ret = regulator_set_load(vreg->reg, uA_load);
+		if (ret)
+			goto out;
+
 		min_uV = on ? vreg->min_uV : 0;
 		ret = regulator_set_voltage(reg, min_uV, vreg->max_uV);
 		if (ret) {
@@ -734,11 +739,6 @@ static int ufs_qcom_config_vreg(struct device *dev,
 					__func__, vreg->name, ret);
 			goto out;
 		}
-
-		uA_load = on ? vreg->max_uA : 0;
-		ret = regulator_set_load(vreg->reg, uA_load);
-		if (ret)
-			goto out;
 	}
 out:
 	return ret;
@@ -897,17 +897,21 @@ static int ufs_qcom_crypto_req_setup(struct ufs_hba *hba,
 		req = lrbp->cmd->request;
 	else
 		return 0;
-	/*
-	 * Right now ICE do not support variable dun but can be
-	 * taken as future enhancement
-	 * if (bio_dun(req->bio)) {
-	 *      dun @bio can be split, so we have to adjust offset
-	 *      *dun = bio_dun(req->bio);
-	 * } else
-	 */
+
+	/* Use request LBA or given dun as the DUN value */
 	if (req->bio) {
+#ifdef CONFIG_PFK
+		if (bio_dun(req->bio)) {
+			/* dun @bio can be split, so we have to adjust offset */
+			*dun = bio_dun(req->bio);
+		} else {
+			*dun = req->bio->bi_iter.bi_sector;
+			*dun >>= UFS_QCOM_ICE_TR_DATA_UNIT_4_KB;
+		}
+#else
 		*dun = req->bio->bi_iter.bi_sector;
 		*dun >>= UFS_QCOM_ICE_TR_DATA_UNIT_4_KB;
+#endif
 	}
 
 	ret = ufs_qcom_ice_req_setup(host, lrbp->cmd, cc_index, enable);
@@ -2508,7 +2512,7 @@ bool ufs_qcom_testbus_cfg_is_ok(struct ufs_qcom_host *host,
 int ufs_qcom_testbus_config(struct ufs_qcom_host *host)
 {
 	int reg = 0;
-	int offset, ret = 0, testbus_sel_offset = 19;
+	int offset = -1, ret = 0, testbus_sel_offset = 19;
 	u32 mask = TEST_BUS_SUB_SEL_MASK;
 	unsigned long flags;
 	struct ufs_hba *hba;
@@ -2573,6 +2577,12 @@ int ufs_qcom_testbus_config(struct ufs_qcom_host *host)
 	 * is legal
 	 */
 	}
+	if (offset < 0) {
+		dev_err(hba->dev, "%s: Bad offset: %d\n", __func__, offset);
+		ret = -EINVAL;
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+		goto out;
+	}
 	mask <<= offset;
 
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
@@ -2624,6 +2634,27 @@ static void ufs_qcom_print_unipro_testbus(struct ufs_hba *hba)
 	kfree(testbus);
 }
 
+static void ufs_qcom_print_utp_hci_testbus(struct ufs_hba *hba)
+{
+	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
+	u32 *testbus = NULL;
+	int i, nminor = 32, testbus_len = nminor * sizeof(u32);
+
+	testbus = kmalloc(testbus_len, GFP_KERNEL);
+	if (!testbus)
+		return;
+
+	host->testbus.select_major = TSTBUS_UTP_HCI;
+	for (i = 0; i < nminor; i++) {
+		host->testbus.select_minor = i;
+		ufs_qcom_testbus_config(host);
+		testbus[i] = ufshcd_readl(hba, UFS_TEST_BUS);
+	}
+	print_hex_dump(KERN_ERR, "UTP_HCI_TEST_BUS ", DUMP_PREFIX_OFFSET,
+			16, 4, testbus, testbus_len, false);
+	kfree(testbus);
+}
+
 static void ufs_qcom_dump_dbg_regs(struct ufs_hba *hba, bool no_sleep)
 {
 	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
@@ -2641,6 +2672,8 @@ static void ufs_qcom_dump_dbg_regs(struct ufs_hba *hba, bool no_sleep)
 	ufs_qcom_testbus_read(hba);
 	usleep_range(1000, 1100);
 	ufs_qcom_print_unipro_testbus(hba);
+	usleep_range(1000, 1100);
+	ufs_qcom_print_utp_hci_testbus(hba);
 	usleep_range(1000, 1100);
 	ufs_qcom_phy_dbg_register_dump(phy);
 	usleep_range(1000, 1100);
@@ -2720,7 +2753,7 @@ static int ufs_qcom_probe(struct platform_device *pdev)
 	 * the regulators.
 	 */
 	if (of_property_read_bool(np, "non-removable") &&
-	    strlen(android_boot_dev) &&
+	    !of_property_read_bool(np, "force-ufshc-probe") &&
 	    strcmp(android_boot_dev, dev_name(dev)))
 		return -ENODEV;
 

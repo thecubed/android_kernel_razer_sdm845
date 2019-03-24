@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -155,6 +155,12 @@ static void a3xx_efuse_speed_bin(struct adreno_device *adreno_dev)
 	unsigned int val;
 	unsigned int speed_bin[3];
 	struct kgsl_device *device = &adreno_dev->dev;
+
+	if (of_get_property(device->pdev->dev.of_node,
+		"qcom,gpu-speed-bin-vectors", NULL)) {
+		adreno_efuse_speed_bin_array(adreno_dev);
+		return;
+	}
 
 	if (of_property_read_u32_array(device->pdev->dev.of_node,
 		"qcom,gpu-speed-bin", speed_bin, 3))
@@ -1332,7 +1338,7 @@ static void a3xx_protect_init(struct adreno_device *adreno_dev)
 	iommu_regs = kgsl_mmu_get_prot_regs(&device->mmu);
 	if (iommu_regs)
 		adreno_set_protected_registers(adreno_dev, &index,
-				iommu_regs->base, iommu_regs->range);
+				iommu_regs->base, ilog2(iommu_regs->range));
 }
 
 static void a3xx_start(struct adreno_device *adreno_dev)

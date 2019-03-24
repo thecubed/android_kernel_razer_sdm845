@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -308,6 +308,7 @@ static void lsm_event_handler(uint32_t opcode, uint32_t token,
 		if (!temp) {
 			dev_err(rtd->dev, "%s: no memory for event status\n",
 				__func__);
+			spin_unlock_irqrestore(&prtd->event_lock, flags);
 			return;
 		}
 		/*
@@ -2396,6 +2397,7 @@ static struct platform_driver msm_lsm_driver = {
 		.name = "msm-lsm-client",
 		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(msm_lsm_client_dt_match),
+		.suppress_bind_attrs = true,
 	},
 	.probe = msm_lsm_probe,
 	.remove = msm_lsm_remove,

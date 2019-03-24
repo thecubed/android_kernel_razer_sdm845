@@ -9,7 +9,8 @@
 #include <linux/uaccess.h>
 
 static char pid[64];
-static char bt_mac[64];
+static char bt_mac[128];
+static char bt_mac_raw[64];
 static char wifi_mac[64];
 static char wifi_mac2[64];
 
@@ -33,35 +34,19 @@ static const struct file_operations fih_mfd_fops_pid = {
 	.release = single_release,
 };
 
-static int fih_mfd_proc_read_bt_mac(struct seq_file *m, void *v)
+static void fih_mfd_read_bt_mac(void)
 {
-	char tmp[(sizeof(bt_mac) * 2)];
 	unsigned int i, k;
 
 	/* 0123456789AB -> 01:23:45:67:89:AB */
-	memset(tmp, 0, sizeof(tmp));
+	memset(bt_mac, 0, sizeof(bt_mac));
 	k = 0;
-	for (i=0; i<strlen(bt_mac); i++) {
-		if ((i > 0)&&((i % 2) == 0)) tmp[k++] = ':';
-		tmp[k++] = bt_mac[i];
+	for (i=0; i<strlen(bt_mac_raw); i++) {
+		if ((i > 0)&&((i % 2) == 0)) bt_mac[k++] = ':';
+		bt_mac[k++] = bt_mac_raw[i];
 	}
-
-	seq_printf(m, "%s\n", tmp);
-
-	return 0;
 }
 
-static int fih_mfd_proc_open_bt_mac(struct inode *inode, struct file *file)
-{
-	return single_open(file, fih_mfd_proc_read_bt_mac, NULL);
-}
-
-static const struct file_operations fih_mfd_fops_bt_mac = {
-	.open    = fih_mfd_proc_open_bt_mac,
-	.read    = seq_read,
-	.llseek  = seq_lseek,
-	.release = single_release,
-};
 
 static int fih_mfd_proc_read_wifi_mac(struct seq_file *m, void *v)
 {
@@ -139,8 +124,8 @@ static int fih_mfd_property(struct platform_device *pdev)
 	if (!p_chr) {
 		pr_info("%s:%d, bt_mac not specified\n", __func__, __LINE__);
 	} else {
-		strlcpy(bt_mac, p_chr, sizeof(bt_mac));
-		pr_info("%s: bt_mac = %s\n", __func__, bt_mac);
+		strlcpy(bt_mac_raw, p_chr, sizeof(bt_mac_raw));
+		pr_info("%s: bt_mac_raw = %s\n", __func__, bt_mac_raw);
 	}
 
 	p_chr = of_get_property(pdev->dev.of_node, "fih-mfd,wifi_mac", NULL);
@@ -178,9 +163,10 @@ static int fih_mfd_probe(struct platform_device *pdev)
 	}
 
 	proc_create("productid", 0, NULL, &fih_mfd_fops_pid);
-	proc_create("bt_mac", 0, NULL, &fih_mfd_fops_bt_mac);
 	proc_create("wifi_mac", 0, NULL, &fih_mfd_fops_wifi_mac);
 	proc_create("wifi_mac2", 0, NULL, &fih_mfd_fops_wifi_mac2);
+
+	fih_mfd_read_bt_mac();
 
 	return rc;
 }
@@ -189,7 +175,6 @@ static int fih_mfd_remove(struct platform_device *pdev)
 {
 	remove_proc_entry ("wifi_mac2", NULL);
 	remove_proc_entry ("wifi_mac", NULL);
-	remove_proc_entry ("bt_mac", NULL);
 	remove_proc_entry ("productid", NULL);
 	return 0;
 }
@@ -228,4 +213,8 @@ static void __exit fih_mfd_exit(void)
 {
 	platform_driver_unregister(&fih_mfd_driver);
 }
+
+module_param_string(bt_mac, bt_mac, sizeof(bt_mac), S_IWUSR | S_IRUGO);
+MODULE_PARM_DESC(bt_mac, "BT MAC address");
+
 module_exit(fih_mfd_exit);
