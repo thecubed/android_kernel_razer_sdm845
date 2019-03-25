@@ -1,4 +1,7 @@
 CONFIG_LOCALVERSION="-perf"
+# Needed to build DTs
+CONFIG_BUILD_ARM64_DT_OVERLAY=y
+
 # CONFIG_LOCALVERSION_AUTO is not set
 # CONFIG_SWAP is not set
 # CONFIG_FHANDLE is not set
